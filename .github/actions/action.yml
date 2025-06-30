@@ -131,7 +131,7 @@ runs:
           $REPO --version
           $REPO --trace sync -c --no-clone-bundle --no-tags --optimized-fetch -j$(nproc --all) --fail-fast
           echo "copy namespace to kernel_platform/common/namespace.c from $GITHUB_WORKSPACE/kernel_platform/common/fs/namespace.c"
-          cp "$GITHUB_WORKSPACE/kernel_platform/common/fs/namespace.c" "kernel_platform/common/fs/namespace.c"
+          
           echo "copy namespace.c to kernel_platform/common/namespace.c finish"
           grep -n "printk" kernel_platform/common/fs/namespace.c
 
