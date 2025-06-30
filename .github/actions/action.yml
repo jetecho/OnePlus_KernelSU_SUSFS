@@ -103,17 +103,17 @@ runs:
           git clone https://github.com/TheWildJames/kernel_patches.git
           
           # Clone the repo with all branches and history (can optimize later if needed)
-          # git clone https://gitlab.com/simonpunk/susfs4ksu.git
-          # cd susfs4ksu || exit 1
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          cd susfs4ksu || exit 1
           
           # Try to check if TARGET_REF is a valid branch or tag
-          # if git rev-parse --verify "origin/$SUSFS_BRANCH" >/dev/null 2>&1 || git rev-parse --verify "$SUSFS_BRANCH" >/dev/null 2>&1 ; then
+          if git rev-parse --verify "origin/$SUSFS_BRANCH" >/dev/null 2>&1 || git rev-parse --verify "$SUSFS_BRANCH" >/dev/null 2>&1 ; then
             # It's a branch or commit hash
-            # git checkout "$SUSFS_BRANCH"
-          # else
-            # echo "Error: '$TARGET_REF' is neither a valid branch/tag nor a valid commit hash."
-            # exit 1
-          # fi
+            git checkout "$SUSFS_BRANCH"
+          else
+            echo "Error: '$TARGET_REF' is neither a valid branch/tag nor a valid commit hash."
+            exit 1
+          fi
 
       - name: Initialize and Sync Kernel Source
         shell: bash
