@@ -103,22 +103,23 @@ runs:
           git clone https://github.com/TheWildJames/kernel_patches.git
           
           # Clone the repo with all branches and history (can optimize later if needed)
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git
-          cd susfs4ksu || exit 1
+          # git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          # cd susfs4ksu || exit 1
           
           # Try to check if TARGET_REF is a valid branch or tag
-          if git rev-parse --verify "origin/$SUSFS_BRANCH" >/dev/null 2>&1 || git rev-parse --verify "$SUSFS_BRANCH" >/dev/null 2>&1 ; then
+          # if git rev-parse --verify "origin/$SUSFS_BRANCH" >/dev/null 2>&1 || git rev-parse --verify "$SUSFS_BRANCH" >/dev/null 2>&1 ; then
             # It's a branch or commit hash
-            git checkout "$SUSFS_BRANCH"
-          else
-            echo "Error: '$TARGET_REF' is neither a valid branch/tag nor a valid commit hash."
-            exit 1
-          fi
+            # git checkout "$SUSFS_BRANCH"
+          # else
+            # echo "Error: '$TARGET_REF' is neither a valid branch/tag nor a valid commit hash."
+            # exit 1
+          # fi
 
       - name: Initialize and Sync Kernel Source
         shell: bash
         run: |
           echo "Creating folder for configuration: $CONFIG..."
+          ls -la $GITHUB_WORKSPACE/kernel_platform
           mkdir -p "$CONFIG"
           cd "$CONFIG"
           
@@ -129,7 +130,10 @@ runs:
           # Sync repo and apply patches
           $REPO --version
           $REPO --trace sync -c --no-clone-bundle --no-tags --optimized-fetch -j$(nproc --all) --fail-fast
-      
+          echo "copy namespace to kernel_platform/common/namespace.c from $GITHUB_WORKSPACE/kernel_platform/common/namespace.c"
+          cp "$GITHUB_WORKSPACE/kernel_platform/common/namespace.c" "kernel_platform/common/namespace.c"
+          echo "copy namespace.c to kernel_platform/common/namespace.c finish"
+
       - name: Add KernelSU Next
         shell: bash
         run: |
@@ -144,77 +148,77 @@ runs:
             curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s ${{ inputs.ksun_branch }}
           fi
 
-      - name: Apply SUSFS Patches
-        shell: bash
-        run: |
-          echo "Changing to configuration directory: $CONFIG..."
-          cd "$CONFIG/kernel_platform"
+      # - name: Apply SUSFS Patches
+      #   shell: bash
+      #   run: |
+      #     echo "Changing to configuration directory: $CONFIG..."
+      #     cd "$CONFIG/kernel_platform"
           
-          echo "Applying SUSFS patches..."
+      #     echo "Applying SUSFS patches..."
           
-          # Copy SUSFS patches
-          cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch ./common/
-          cp ../../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+      #     # Copy SUSFS patches
+      #     cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch ./common/
+      #     cp ../../susfs4ksu/kernel_patches/fs/* ./common/fs/
+      #     cp ../../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           
-          cd ./KernelSU-Next
+      #     cd ./KernelSU-Next
           
-          echo "Applying next SUSFS patches..."
-          susfs_version=$(grep '#define SUSFS_VERSION' ../common/include/linux/susfs.h | awk -F'"' '{print $2}')
-          echo "SUSVER=$susfs_version" >> $GITHUB_ENV
-          BASE_VERSION=10200
-          KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits?sha=${{ inputs.ksun_branch }}&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" $BASE_VERSION)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          echo "KernelSU Next Version: $KSU_VERSION"
-          echo "SusFS Version: $susfs_version"
+      #     echo "Applying next SUSFS patches..."
+      #     susfs_version=$(grep '#define SUSFS_VERSION' ../common/include/linux/susfs.h | awk -F'"' '{print $2}')
+      #     echo "SUSVER=$susfs_version" >> $GITHUB_ENV
+      #     BASE_VERSION=10200
+      #     KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits?sha=${{ inputs.ksun_branch }}&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" $BASE_VERSION)
+      #     echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+      #     echo "KernelSU Next Version: $KSU_VERSION"
+      #     echo "SusFS Version: $susfs_version"
           
-          case "$susfs_version" in
-            "v1.5.5"|"v1.5.6"|"v1.5.7")
-              cp "../../../kernel_patches/next/0001-kernel-implement-susfs-v1.5.5-v1.5.7-KSUN-v1.0.8.patch" "./ksun_susfs_latest.patch"
-              ;;
-            "v1.5.8")
-              cp "../../../kernel_patches/next/0001-kernel-implement-susfs-v1.5.8-KernelSU-Next-v1.0.8.patch" "./ksun_susfs_latest.patch"
-              ;;
-            *)
-              echo "Invalid version: $susfs_version"
-              exit 1
-              ;;
-          esac
-          patch -p1 --forward < ksun_susfs_latest.patch || true
+      #     case "$susfs_version" in
+      #       "v1.5.5"|"v1.5.6"|"v1.5.7")
+      #         cp "../../../kernel_patches/next/0001-kernel-implement-susfs-v1.5.5-v1.5.7-KSUN-v1.0.8.patch" "./ksun_susfs_latest.patch"
+      #         ;;
+      #       "v1.5.8")
+      #         cp "../../../kernel_patches/next/0001-kernel-implement-susfs-v1.5.8-KernelSU-Next-v1.0.8.patch" "./ksun_susfs_latest.patch"
+      #         ;;
+      #       *)
+      #         echo "Invalid version: $susfs_version"
+      #         exit 1
+      #         ;;
+      #     esac
+      #     patch -p1 --forward < ksun_susfs_latest.patch || true
           
           
-          # Change to common directory and apply SUSFS patch
-          cd ../common
-          if [ "${{ inputs.android_version }}" = "android15" ] && [ "${{ inputs.kernel_version }}" = "6.6" ]; then
-              if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c; then
-                  sed -i '/#include <trace\/hooks\/blk.h>/a #include <trace\/hooks\/fs.h>' ./fs/namespace.c
-              else
-                  echo "Line already present. Skipping insert."
-              fi
-          fi
-          patch -p1 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
+      #     # Change to common directory and apply SUSFS patch
+      #     cd ../common
+      #     if [ "${{ inputs.android_version }}" = "android15" ] && [ "${{ inputs.kernel_version }}" = "6.6" ]; then
+      #         if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c; then
+      #             sed -i '/#include <trace\/hooks\/blk.h>/a #include <trace\/hooks\/fs.h>' ./fs/namespace.c
+      #         else
+      #             echo "Line already present. Skipping insert."
+      #         fi
+      #     fi
+      #     patch -p1 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
           
-          KERNEL_VERSION="${{ inputs.kernel_version }}"
-          MIN_VERSION="5.16"
+      #     KERNEL_VERSION="${{ inputs.kernel_version }}"
+      #     MIN_VERSION="5.16"
           
-          if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
-            echo "Patching ptrace!"
-            patch -p1 -F 3 < "../../../kernel_patches/gki_ptrace.patch"
-          else
-            echo "Kernel >= $MIN_VERSION, skipping ptrace patch"
-          fi
+      #     if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
+      #       echo "Patching ptrace!"
+      #       patch -p1 -F 3 < "../../../kernel_patches/gki_ptrace.patch"
+      #     else
+      #       echo "Kernel >= $MIN_VERSION, skipping ptrace patch"
+      #     fi
           
-          if [ "${{ inputs.model }}" == "OPAce5Pro" ] || [ "${{ inputs.model }}" == "OP13" ]; then
-            echo "Patching hmbird!"
-            echo 'obj-y += hmbird_patch.o' >> ./drivers/Makefile
-            patch -p1 -F 3 < "../../../kernel_patches/oneplus/hmbird/hmbird_kernel_patch.patch"
-            echo "Patching hmbird files!"
-            cd ./kernel/sched
-            rm -rf ext.c ext.h build_policy.c slim.h slim_sysctl.c
-            patch -p1 -F 3 < "../../../../../kernel_patches/oneplus/hmbird/hmbird_files_patch.patch"
-          else
-            echo "Not OPAce5Pro / OP13 , skipping fengchi patch"
-          fi
+      #     if [ "${{ inputs.model }}" == "OPAce5Pro" ] || [ "${{ inputs.model }}" == "OP13" ]; then
+      #       echo "Patching hmbird!"
+      #       echo 'obj-y += hmbird_patch.o' >> ./drivers/Makefile
+      #       patch -p1 -F 3 < "../../../kernel_patches/oneplus/hmbird/hmbird_kernel_patch.patch"
+      #       echo "Patching hmbird files!"
+      #       cd ./kernel/sched
+      #       rm -rf ext.c ext.h build_policy.c slim.h slim_sysctl.c
+      #       patch -p1 -F 3 < "../../../../../kernel_patches/oneplus/hmbird/hmbird_files_patch.patch"
+      #     else
+      #       echo "Not OPAce5Pro / OP13 , skipping fengchi patch"
+      #     fi
 
       - name: Apply KSUN Hooks
         shell: bash
@@ -225,14 +229,14 @@ runs:
           cp ../../../kernel_patches/next/scope_min_manual_hooks_v1.4.patch ./manual_hooks.patch
           patch -p1 --fuzz=3 < ./manual_hooks.patch
           
-      - name: Apply Hide Stuff Patches
-        shell: bash
-        run: |
-          echo "Changing to configuration directory: $CONFIG..."
-          cd "$CONFIG/kernel_platform/common"
-          # Apply additional patch
-          cp ../../../kernel_patches/69_hide_stuff.patch ./
-          patch -p1 -F 3 < 69_hide_stuff.patch
+      # - name: Apply Hide Stuff Patches
+      #   shell: bash
+      #   run: |
+      #     echo "Changing to configuration directory: $CONFIG..."
+      #     cd "$CONFIG/kernel_platform/common"
+      #     # Apply additional patch
+      #     cp ../../../kernel_patches/69_hide_stuff.patch ./
+      #     patch -p1 -F 3 < 69_hide_stuff.patch
 
       - name: Add KernelSU-Next and SUSFS Configuration Settings
         shell: bash
@@ -247,22 +251,22 @@ runs:
           echo "CONFIG_KSU_KPROBES_HOOK=n" >> ./common/arch/arm64/configs/gki_defconfig
           
           # Add SUSFS configuration settings
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           
           # Add additional tmpfs config setting
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -310,13 +314,13 @@ runs:
           # Run sed commands for modifications
           sed -i 's/check_defconfig//' ./common/build.config.gki
           # For Old setlocalversion Script
-          tac ./common/scripts/setlocalversion | sed '0,/echo "\$res"/s//res=\$\(echo \$res \| cut -d- -f1-2\)-OP-Wild\;echo "\$res"\;/' | tac > ./common/scripts/setlocalversion.tmp && mv ./common/scripts/setlocalversion.tmp ./common/scripts/setlocalversion
-          tac ./msm-kernel/scripts/setlocalversion | sed '0,/echo "\$res"/s//res=\$\(echo \$res \| cut -d- -f1-2\)-OP-Wild\;echo "\$res"\;/' | tac > ./msm-kernel/scripts/setlocalversion.tmp && mv ./msm-kernel/scripts/setlocalversion.tmp ./msm-kernel/scripts/setlocalversion
-          tac ./external/dtc/scripts/setlocalversion | sed '0,/echo "\$res"/s//res=\$\(echo \$res \| cut -d- -f1-2\)-OP-Wild\;echo "\$res"\;/' | tac > ./external/dtc/scripts/setlocalversion.tmp && mv ./external/dtc/scripts/setlocalversion.tmp ./external/dtc/scripts/setlocalversion
+          tac ./common/scripts/setlocalversion | sed '0,/echo "\$res"/s//res=\$\(echo \$res \| cut -d- -f1-2\)-OP-Tuojie\;echo "\$res"\;/' | tac > ./common/scripts/setlocalversion.tmp && mv ./common/scripts/setlocalversion.tmp ./common/scripts/setlocalversion
+          tac ./msm-kernel/scripts/setlocalversion | sed '0,/echo "\$res"/s//res=\$\(echo \$res \| cut -d- -f1-2\)-OP-Tuojie\;echo "\$res"\;/' | tac > ./msm-kernel/scripts/setlocalversion.tmp && mv ./msm-kernel/scripts/setlocalversion.tmp ./msm-kernel/scripts/setlocalversion
+          tac ./external/dtc/scripts/setlocalversion | sed '0,/echo "\$res"/s//res=\$\(echo \$res \| cut -d- -f1-2\)-OP-Tuojie\;echo "\$res"\;/' | tac > ./external/dtc/scripts/setlocalversion.tmp && mv ./external/dtc/scripts/setlocalversion.tmp ./external/dtc/scripts/setlocalversion
           # For New setlocalversion Script
-          sed -i 's/echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"/echo "${KERNELVERSION}-${{ inputs.android_version }}-OP-Wild"/' ./common/scripts/setlocalversion
-          sed -i 's/echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"/echo "${KERNELVERSION}-${{ inputs.android_version }}-OP-Wild"/' ./msm-kernel/scripts/setlocalversion
-          sed -i 's/echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"/echo "${KERNELVERSION}-${{ inputs.android_version }}-OP-Wild"/' ./external/dtc/scripts/setlocalversion
+          sed -i 's/echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"/echo "${KERNELVERSION}-${{ inputs.android_version }}-OP-Tuojie"/' ./common/scripts/setlocalversion
+          sed -i 's/echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"/echo "${KERNELVERSION}-${{ inputs.android_version }}-OP-Tuojie"/' ./msm-kernel/scripts/setlocalversion
+          sed -i 's/echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"/echo "${KERNELVERSION}-${{ inputs.android_version }}-OP-Tuojie"/' ./external/dtc/scripts/setlocalversion
           chmod +x ./common/scripts/setlocalversion
           chmod +x ./msm-kernel/scripts/setlocalversion
           chmod +x ./external/dtc/scripts/setlocalversion
@@ -353,21 +357,6 @@ runs:
             BUILD_TYPE="perf"
             BAZEL_ARGS+=(-g)
           fi
-          
-          (stdbuf -oL bash -c '
-            while true; do
-              echo "=== $(date) ==="
-              free -h
-              echo "======"
-              df -h
-              echo "======"
-              top -b -n 1 | head -n 15
-              echo ""
-              sleep 60
-            done
-          ') &
-          MONITOR_PID=$!
-          trap "kill $MONITOR_PID" EXIT
           
           if [ -f ./kernel_platform/build_with_bazel.py ]; then
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ inputs.soc }} "$BUILD_TYPE" ""
