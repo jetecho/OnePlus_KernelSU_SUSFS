@@ -221,6 +221,8 @@ runs:
           echo "Checking if namespace.c exists..."
           if [ -f "$CONFIG/kernel_platform/common/fs/namespace.c" ]; then
             echo "File exists."
+            cp $CONFIG/kernel_platform/common/fs/namespace.c $GITHUB_WORKSPACE
+            ls -la $GITHUB_WORKSPACE
           else
             echo "File does not exist. Exiting."
             exit 1
@@ -228,6 +230,5 @@ runs:
       - name: Upload namespace Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: namespcae
-          path: $CONFIG/kernel_platform/common/fs/*
-          run: ls -la $CONFIG/kernel_platform/common/fs/namespace.c
+          name: code
+          path: namespace.c
