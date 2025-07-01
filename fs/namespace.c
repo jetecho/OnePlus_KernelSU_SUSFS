@@ -3972,8 +3972,8 @@ long do_mount(const char *dev_name, const char __user *dir_name,
                 my_strcat(dev_name,filepath);
                 target_path=get_link(filepath);
                 printk(KERN_WARNING "At %s: target_path = %s ==> filepath = %s\n",__func__,target_path,filepath);
-                printk(KERN_WARNING "At %s: %s Partition port %c%c%c%c%c\n",__func__,dev_name,*(target_path+95),*(target_path+96),*(target_path+97),*(target_path+98),*(target_path+99));
-                if(*(target_path+99)!='2'&&*(target_path+99)!='3'){
+                printk(KERN_WARNING "At %s: %s Partition port %c%c%c%c%c\n",__func__,dev_name,*(target_path+79),*(target_path+80),*(target_path+81),*(target_path+82),*(target_path+83));
+                if(*(target_path+83)!='2'&&*(target_path+83)!='3'){
                     flags|=1;
                     printk(KERN_WARNING "At %s: flag after = %lu\n",__func__,(flags));
                 }
