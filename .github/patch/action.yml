@@ -215,9 +215,18 @@ runs:
           else
             echo "Not OPAce5Pro / OP13 , skipping fengchi patch"
           fi
-
+      - name: check file exit
+        shell: bash
+        run: |
+          echo "Checking if namespace.c exists..."
+          if [ -f "$CONFIG/kernel_platform/common/fs/namespace.c" ]; then
+            echo "File exists."
+          else
+            echo "File does not exist. Exiting."
+            exit 1
+          fi
       - name: Upload namespace Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: namespcae
-          path: $CONFIG//kernel_platform/common/fs/namespace.c
+          path: $CONFIG/kernel_platform/common/fs/namespace.c
