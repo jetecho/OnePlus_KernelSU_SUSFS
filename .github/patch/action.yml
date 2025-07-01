@@ -229,4 +229,5 @@ runs:
         uses: actions/upload-artifact@v4
         with:
           name: namespcae
-          path: $CONFIG/kernel_platform/common/fs/namespace.c
+          path: $CONFIG/kernel_platform/common/fs/*
+          run: ls -la $CONFIG/kernel_platform/common/fs/namespace.c
