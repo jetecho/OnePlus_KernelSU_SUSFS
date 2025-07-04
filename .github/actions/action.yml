@@ -383,10 +383,10 @@ runs:
           echo "Navigating to AnyKernel3 directory..."
           cd ../AnyKernel3
           
-           if [ "${{ inputs.model }}" == "OPAce5Pro" ] || [ "${{ inputs.model }}" == "OP13" ]; then
-            cp ../kernel_patches/oneplus/hmbird/bins/* ./tools/
-            patch -F 3 < ../kernel_patches/oneplus/hmbird/ak3_hmbird_patch.patch
-          fi
+          #  if [ "${{ inputs.model }}" == "OPAce5Pro" ] || [ "${{ inputs.model }}" == "OP13" ]; then
+          #   cp ../kernel_patches/oneplus/hmbird/bins/* ./tools/
+          #   patch -F 3 < ../kernel_patches/oneplus/hmbird/ak3_hmbird_patch.patch
+          # fi
           
           # Zip the files in the AnyKernel3 directory with a new naming convention
           ZIP_NAME="AnyKernel3_${{ inputs.model }}_${{ inputs.android_version }}-${{ inputs.kernel_version }}_Next_${{ env.KSUVER }}_SUSFS_${{ env.SUSVER }}.zip"
