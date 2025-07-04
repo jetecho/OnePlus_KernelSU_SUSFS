@@ -147,8 +147,8 @@ runs:
       - name: Apply SUSFS Patches
         shell: bash
         run: |
-          # echo "Changing to configuration directory: $CONFIG..."
-          # cd "$CONFIG/kernel_platform"
+          echo "Changing to configuration directory: $CONFIG..."
+          cd "$CONFIG/kernel_platform"
           
           # echo "Applying SUSFS patches..."
           
