@@ -78,7 +78,7 @@ jobs:
       - name: Initialize Repo and Sync
         run: |
           mkdir kernel_workspace && cd kernel_workspace
-          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ needs.get-config.outputs.CPU }} -m ${{ github.event.inputs.FILE }}.xml --depth=1
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m oneplus_13.xml --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
           if [  -e kernel_platform/common/BUILD.bazel ]; then
           sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
@@ -93,7 +93,7 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
           CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
-          KERNEL_VERSION="${{ needs.get-config.outputs.KERNEL_VERSION }}"
+          KERNEL_VERSION="6.6"
           
           # TMPFS配置*
           echo "CONFIG_TMPFS_XATTR=y" >> "$CONFIG_FILE"
@@ -117,7 +117,6 @@ jobs:
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
       - name: Add sched_ext
-        if: ${{ github.event.inputs.SCHED == 'true' }}
         run: |
          cd kernel_workspace/kernel_platform/
          git clone https://github.com/HanKuCha/sched_ext.git
@@ -127,15 +126,14 @@ jobs:
 
 
       - name: Fallback to Build Kernel
-        if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
         run: |
           cd kernel_workspace
           if [ -f ./kernel_platform/build_with_bazel.py ]; then
-            ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ needs.get-config.outputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
-            ./kernel_platform/build_with_bazel.py --lto=thin -t ${{ needs.get-config.outputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+            ./kernel_platform/oplus/bazel/oplus_modules_variant.sh sun perf
+            ./kernel_platform/build_with_bazel.py --lto=thin -t sun perf
           else
             LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
-            ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ needs.get-config.outputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+            ./kernel_platform/oplus/build/oplus_build_kernel.sh sun perf
           fi
 
       - name: Make AnyKernel3
@@ -168,7 +166,7 @@ jobs:
           fi
 
           # 使用官方脚本编译的 sm8750，选择性复制其它镜像文件
-          if [ -n "$dir2" ] && [ "${{ needs.get-config.outputs.CPU }}" = "sm8750" ] && [ "${{ github.event.inputs.FAST_BUILD }}" = "false" ]; then
+          if [ -n "$dir2" ]; then
             echo "当前正在使用官方脚本构建 sm8750，需额外复制一些其它镜像文件：dtbo.img、system_dlkm.img、vendor_dlkm.img、vendor_boot.img。请注意，如果你在刷完官方脚本构建后想换成极速构建，请还原这些分区！"
             echo "You are currently building sm8750 with the official script. Additional image files will be copied: dtbo.img, system_dlkm.img, vendor_dlkm.img, vendor_boot.img. Please note: If you switch to fast build after flashing this build, make sure to restore these partitions!"
             for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
@@ -189,8 +187,8 @@ jobs:
       - name: Auto map FILE to Android version by manifest
         id: file_clean
         run: |
-          file="${{ github.event.inputs.FILE }}"
-          cpu="${{ needs.get-config.outputs.CPU }}"
+          file="oneplus_13"
+          cpu="sm8750"
           xml=".repo/manifests_fallback/${file}.xml"
           cd $GITHUB_WORKSPACE
           # 去掉末尾的 _x（只删一个）
@@ -215,5 +213,5 @@ jobs:
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3_${{ steps.file_clean.outputs.value }}${{ steps.suffix.outputs.value }}
+          name: AnyKernel3_${{ steps.file_clean.outputs.value }}
           path: ./AnyKernel3/*
