@@ -21,11 +21,6 @@ jobs:
       CCACHE_MAXSIZE: 8G
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      - name: list files
-        run : |
-          ls -al
 
       - name: Check Disk Space
         run: df -h
@@ -59,7 +54,13 @@ jobs:
         run: |
           git config --global user.name "jetecho"
           git config --global user.email "tanzhifu789@163.com"
+          
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
+      - name: list files
+        run : |
+          ls -al
       - name: Install Dependencies
         run: |
           sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock
