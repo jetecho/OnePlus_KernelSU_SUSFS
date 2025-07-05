@@ -1,6 +1,6 @@
 name: Build OnePlus 13 Kernel
 on:
-  pull:
+  push:
     branches:
       - main
     paths:
