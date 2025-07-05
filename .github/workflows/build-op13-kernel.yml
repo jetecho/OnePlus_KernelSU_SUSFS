@@ -94,8 +94,7 @@ jobs:
       
       - name: Copy NameSpace Change
         run: |
-          ls -laE
-          cd kernel_workspace
+          ls -la
           echo "Copying namespace from $namespace.c to kernel_workspace/kernel_platform/common/fs/namespace.c"
           cp "namespace.c" "kernel_workspace/kernel_platform/common/fs/namespace.c"
           echo "Copying namespace from namespace.h to kernel_workspace/kernel_platform/common/fs/namespace.h finish"
