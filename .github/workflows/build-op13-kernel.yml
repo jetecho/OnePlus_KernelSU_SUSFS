@@ -23,6 +23,9 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+      - name: list files
+        run : |
+          ls -la
 
       - name: Check Disk Space
         run: df -h
@@ -88,12 +91,21 @@ jobs:
           fi
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+      
+      - name: Copy NameSpace Change
+        run: |
+          ls -la $GITHUB_WORKSPACE
+          cd kernel_workspace
+          echo "Copying namespace from $GITHUB_WORKSPACE/namespace.c to kernel_platform/common/fs/namespace.c"
+          cp "$GITHUB_WORKSPACE/namespace.c" "kernel_platform/common/fs/namespace.c"
+          echo "Copying namespace from $GITHUB_WORKSPACE/namespace.h to kernel_platform/common/fs/namespace.h finish"
+
       # 配置信息
       - name: Add Configuration Settings
         run: |
           cd kernel_workspace/kernel_platform
           CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
-          KERNEL_VERSION="6.6"
+          # KERNEL_VERSION="6.6"
           
           # TMPFS配置*
           echo "CONFIG_TMPFS_XATTR=y" >> "$CONFIG_FILE"
