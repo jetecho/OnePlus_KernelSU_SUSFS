@@ -11,10 +11,10 @@ jobs:
     name: Build OnePlus 13 Kernel
     runs-on: ubuntu-latest
     env:
-      CPU="sm8750"
-      CPUD="sun"
-      ANDROID_VERSION="android15"
-      KERNEL_VERSION="6.6"
+      CPU: "sm8750"
+      CPUD: "sun"
+      ANDROID_VERSION: "android15"
+      KERNEL_VERSION: "6.6"
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
