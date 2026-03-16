@@ -1,4 +1,4 @@
-name: Build Stock OnePlus 13 PJZ Kernel
+name: Build Stock OnePlus 13 Kernel
 
 permissions:
   contents: write
@@ -7,6 +7,15 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      device_model:
+        description: 'Select device model'
+        required: true
+        type: choice
+        options:
+          - OP13-PJZ
+          - OP13-CPH
+          - Both
+        default: OP13-PJZ
       make_release:
         description: 'Create a release?'
         required: true
@@ -23,23 +32,56 @@ on:
         type: boolean
         default: false
 
-env:
-  OP_MODEL: OP13-PJZ
-  OP_SOC: sun
-  OP_BRANCH: wild/sm8750
-  OP_MANIFEST: oneplus_13_v.xml
-  OP_ANDROID_VERSION: android15
-  OP_KERNEL_VERSION: "6.6"
-  OP_OS_VERSION: OOS15
-  OP_LTO: thin
-  OP_RUST_BUILD: false
-  OP_UNAME: OP-STOCK
-
 jobs:
-  build:
+  set-device-matrix:
     runs-on: ubuntu-latest
     outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      device_count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 🔍 Generate device matrix
+        id: set-matrix
+        run: |
+          input="${{ github.event.inputs.device_model }}"
+
+          if [ "$input" = "Both" ]; then
+            devices='[{"model":"OP13-PJZ","soc":"sun","manifest":"oneplus_13_v.xml"},{"model":"OP13-CPH","soc":"sun","manifest":"oneplus_13_global_v.xml"}]'
+          elif [ "$input" = "OP13-PJZ" ]; then
+            devices='[{"model":"OP13-PJZ","soc":"sun","manifest":"oneplus_13_v.xml"}]'
+          elif [ "$input" = "OP13-CPH" ]; then
+            devices='[{"model":"OP13-CPH","soc":"sun","manifest":"oneplus_13_global_v.xml"}]'
+          else
+            echo "::error::Unknown device: $input"
+            exit 1
+          fi
+
+          count=$(echo "$devices" | jq 'length')
+          echo "✅ Selected $count device(s)"
+          echo "Devices: $(echo "$devices" | jq -r '.[].model' | tr '\n' ' ')"
+
+          echo "matrix={\"include\":$(echo "$devices" | jq -c '.')}" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: set-device-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-device-matrix.outputs.matrix) }}
+    outputs:
       kernel_version: ${{ steps.save_metadata.outputs.kernel_version }}
+      device_model: ${{ matrix.model }}
+    env:
+      OP_MODEL: ${{ matrix.model }}
+      OP_SOC: ${{ matrix.soc }}
+      OP_MANIFEST: ${{ matrix.manifest }}
+      OP_BRANCH: wild/sm8750
+      OP_ANDROID_VERSION: android15
+      OP_KERNEL_VERSION: "6.6"
+      OP_OS_VERSION: OOS15
+      OP_LTO: thin
+      OP_RUST_BUILD: false
+      OP_UNAME: OP-STOCK
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v6
@@ -496,7 +538,7 @@ jobs:
               ;;
             "full")
               scripts/config --file "$OUT/.config" -e LTO_CLANG
-              scripts/config --file "$OUT/.config" -e LTO_CLANG_FULL
+              scripts/config --file "$OUT".config" -e LTO_CLANG_FULL
               scripts/config --file "$OUT/.config" -d LTO_CLANG_NONE
               scripts/config --file "$OUT/.config" -d LTO_CLANG_THIN
               ;;
@@ -777,11 +819,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 📥 Download Artifact
+      - name: 📥 Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: OP13-PJZ-stock-kernel
           path: ./artifacts
+          pattern: OP13-*-stock-kernel
+          merge-multiple: false
 
       - name: 🏷️ Generate and Create New Tag
         env:
@@ -807,7 +850,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat > release_notes.md << EOF
-          # 📱 OnePlus 13 PJZ Stock Kernel
+          # 📱 OnePlus 13 Stock Kernel
 
           > **Build Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           > **Build ID:** \`${{ github.run_id }}\`
@@ -818,7 +861,7 @@ jobs:
 
           | Component | Version |
           |-----------|---------|
-          | **Device** | OP13-PJZ (Sun/SM8750) |
+          | **Devices** | OP13-PJZ, OP13-CPH |
           | **OS Version** | OOS15 |
           | **Kernel Version** | ${{ needs.build.outputs.kernel_version }} |
           | **Build Type** | Stock (No KernelSU/SUSFS) |
@@ -840,7 +883,7 @@ jobs:
 
           ## 📥 Installation
 
-          1. Download the ZIP file
+          1. Download the ZIP file for your device
           2. Flash via Kernel Flasher or custom recovery
           3. Reboot
 
@@ -854,7 +897,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "Stock Kernel ${{ needs.build.outputs.kernel_version }}" \
             --notes-file release_notes.md \
-            ./artifacts/*.zip
+            ./artifacts/*/*.zip
 
       - name: 📊 Release Summary
         run: |
@@ -866,4 +909,14 @@ jobs:
 
           **Tag:** [\`${{ env.NEW_TAG }}\`](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }})
 
+          ### 📦 Assets
           EOF
+
+          for zip in ./artifacts/*/*.zip; do
+            if [ -f "$zip" ]; then
+              name=$(basename "$zip")
+              size=$(stat -c%s "$zip")
+              size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
+              echo "- \`$name\` (${size_mb} MB)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
