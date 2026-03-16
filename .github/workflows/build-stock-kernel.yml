@@ -24,20 +24,22 @@ on:
         default: false
 
 env:
-  DEVICE_MODEL: OP13-PJZ
-  DEVICE_SOC: sun
-  DEVICE_BRANCH: wild/sm8750
-  DEVICE_MANIFEST: oneplus_13_v.xml
-  ANDROID_VERSION: android15
-  KERNEL_VERSION: 6.6
-  OS_VERSION: OOS15
-  LTO_TYPE: thin
+  OP_MODEL: OP13-PJZ
+  OP_SOC: sun
+  OP_BRANCH: wild/sm8750
+  OP_MANIFEST: oneplus_13_v.xml
+  OP_ANDROID_VERSION: android15
+  OP_KERNEL_VERSION: "6.6"
+  OP_OS_VERSION: OOS15
+  OP_LTO: thin
+  OP_RUST_BUILD: false
+  OP_UNAME: OP-STOCK
 
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      kernel_version: ${{ steps.kernel-info.outputs.kernel_full_ver }}
+      kernel_version: ${{ steps.save_metadata.outputs.kernel_version }}
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v6
@@ -75,7 +77,8 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git curl ca-certificates build-essential clang lld flex bison \
             libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
-            libxml2-utils rsync unzip dwarves file python3 ccache jq bc
+            libxml2-utils rsync unzip dwarves file python3 ccache jq bc \
+            dos2unix kmod libdw-dev elfutils
           sudo apt-get clean
           echo "✅ Dependencies installed"
           echo "::endgroup::"
@@ -98,12 +101,12 @@ jobs:
           set -euo pipefail
           echo "::group::Initialize and sync kernel source"
 
-          mkdir -p kernel_build
-          cd kernel_build
+          mkdir -p "$OP_MODEL"
+          cd "$OP_MODEL"
 
           # Copy manifest
           mkdir -p .repo/manifests
-          cp "../manifests/oos15/${{ env.DEVICE_MANIFEST }}" .repo/manifests/temp_manifest.xml
+          cp "../manifests/oos15/$OP_MANIFEST" .repo/manifests/temp_manifest.xml
 
           # Initialize repo
           "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
@@ -130,23 +133,29 @@ jobs:
           echo "✅ Kernel source synced"
           echo "::endgroup::"
 
-      - name: Set Environment Paths
-        run: |
-          KERNEL_DIR="$GITHUB_WORKSPACE/kernel_build"
-          KERNEL_PLATFORM="$KERNEL_DIR/kernel_platform"
-          COMMON_KERNEL="$KERNEL_PLATFORM/common"
-
-          echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
-          echo "KERNEL_PLATFORM=$KERNEL_PLATFORM" >> "$GITHUB_ENV"
-          echo "COMMON_KERNEL=$COMMON_KERNEL" >> "$GITHUB_ENV"
-
-      - name: 📊 Get Kernel Version Info
-        id: kernel-info
+      - name: Set Dir Paths
         run: |
           set -euo pipefail
-          cd "$COMMON_KERNEL"
+          CONFIG_DIR="$GITHUB_WORKSPACE/$OP_MODEL"
+          ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+          KERNEL_PLATFORM_DIR="$CONFIG_DIR/kernel_platform"
+          COMMON_KERNEL_DIR="$KERNEL_PLATFORM_DIR/common"
+          MSM_KERNEL_DIR="$KERNEL_PLATFORM_DIR/msm-kernel"
 
-          # Get branch info
+          mkdir -p "$ARTIFACTS_DIR"
+
+          echo "CONFIG_FOLDER=$CONFIG_DIR" >> "$GITHUB_ENV"
+          echo "ARTIFACTS_FOLDER=$ARTIFACTS_DIR" >> "$GITHUB_ENV"
+          echo "KERNEL_PLATFORM_FOLDER=$KERNEL_PLATFORM_DIR" >> "$GITHUB_ENV"
+          echo "COMMON_KERNEL_FOLDER=$COMMON_KERNEL_DIR" >> "$GITHUB_ENV"
+          echo "MSM_KERNEL_FOLDER=$MSM_KERNEL_DIR" >> "$GITHUB_ENV"
+
+      - name: Get Kernel Version Info
+        run: |
+          set -euo pipefail
+          echo "::group::Get kernel version"
+          cd "$COMMON_KERNEL_FOLDER"
+
           CONFIG_FILES=("build.config.common" "build.config.constants")
           BRANCH_LINE=""
           for f in "${CONFIG_FILES[@]}"; do
@@ -156,37 +165,54 @@ jobs:
             fi
           done
 
-          BRANCH_VALUE="${BRANCH_LINE#*=}"
-          ANDROID_VER="${BRANCH_VALUE%-*}"
+          if [ -z "$BRANCH_LINE" ]; then
+            echo "::error::No BRANCH= found in config files"; exit 1
+          fi
 
-          # Get kernel version
+          BRANCH_VALUE="${BRANCH_LINE#*=}"
+          ANDROID_VERSION="${BRANCH_VALUE%-*}"
+
           VERSION=$(grep '^VERSION *=' Makefile | awk '{print $3}')
           PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
           SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
           FULL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
 
-          KERNEL_FULL_VER="$ANDROID_VER-$FULL_VERSION"
+          cd "$ARTIFACTS_FOLDER"
+          echo "$ANDROID_VERSION-$FULL_VERSION" > "${OP_MODEL}_${OP_OS_VERSION}.txt"
+          echo "$OP_OS_VERSION" >> "${OP_MODEL}_${OP_OS_VERSION}.txt"
 
-          echo "KERNEL_FULL_VER=$KERNEL_FULL_VER" >> "$GITHUB_ENV"
-          echo "ANDROID_VER=$ANDROID_VER" >> "$GITHUB_ENV"
-          echo "KERNEL_VER=$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
+          {
+            echo "ANDROID_VER=$ANDROID_VERSION"
+            echo "KERNEL_VER=$VERSION.$PATCHLEVEL"
+            echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION"
+          } >> "$GITHUB_ENV"
 
-          echo "kernel_full_ver=$KERNEL_FULL_VER" >> "$GITHUB_OUTPUT"
-
-          echo "✅ Detected kernel version: $KERNEL_FULL_VER"
+          echo "✅ Detected: $ANDROID_VERSION-$FULL_VERSION"
+          echo "::endgroup::"
 
       - name: 🏷️ Set Build Identity
         run: |
-          echo "BUILD_USER=OnePlus" >> "$GITHUB_ENV"
-          echo "BUILD_HOST=ubuntu-build" >> "$GITHUB_ENV"
+          set -euo pipefail
+          echo "::group::Set build user/host"
 
-      - name: Detect Clang Toolchain
+          BUILD_USER="OnePlus"
+          BUILD_HOST="ubuntu-build"
+
+          echo "BUILD_USER=$BUILD_USER" >> "$GITHUB_ENV"
+          echo "BUILD_HOST=$BUILD_HOST" >> "$GITHUB_ENV"
+
+          echo "✅ Build identity configured:"
+          echo "   User: $BUILD_USER"
+          echo "   Host: $BUILD_HOST"
+          echo "::endgroup::"
+
+      - name: Detect Clang
         run: |
           set -euo pipefail
           echo "::group::Detect Clang"
 
           CLANG_FOUND=false
-          for base in "$KERNEL_PLATFORM/prebuilts" "$KERNEL_PLATFORM/prebuilts-master"; do
+          for base in "$KERNEL_PLATFORM_FOLDER/prebuilts" "$KERNEL_PLATFORM_FOLDER/prebuilts-master"; do
             [ -d "$base/clang/host/linux-x86" ] || continue
             latest=$(ls -d "$base"/clang/host/linux-x86/clang-r*/ 2>/dev/null | sort -V | tail -n1 || true)
             if [ -n "$latest" ] && [ -x "$latest/bin/clang" ]; then
@@ -199,6 +225,7 @@ jobs:
           if ! $CLANG_FOUND && command -v clang >/dev/null 2>&1; then
             CLANG_BIN="$(dirname "$(command -v clang)")"
             CLANG_FOUND=true
+            echo "Using system clang."
           fi
 
           $CLANG_FOUND || { echo "::error::No clang toolchain found"; exit 1; }
@@ -210,27 +237,37 @@ jobs:
           echo "✅ Detected Clang: $CLANG_VERSION"
           echo "::endgroup::"
 
-      - name: Configure ccache
-        if: ${{ inputs.clean_build != true }}
+      - name: Derive Clang Short Version
         run: |
-          echo "::group::Configure ccache"
-          export CCACHE_DIR="$HOME/.ccache"
-          export CCACHE_MAXSIZE="1G"
+          set -euo pipefail
+          echo "::group::Derive Clang fingerprint"
 
-          mkdir -p "$CCACHE_DIR"
+          short="$("${CLANG_BIN_PATH}/clang" --version | sed -n '1s/.*clang-r\([0-9.]\+\).*/\1/p')"
 
-          ccache -M "$CCACHE_MAXSIZE"
-          ccache -o compression=true
-          ccache -o compression_level=3
-          ccache -o direct_mode=true
-          ccache -o hash_dir=false
-          ccache -o file_clone=true
-          ccache -o inode_cache=true
-          ccache -o umask=002
-          ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
+          if [ -z "$short" ]; then
+            short="$("${CLANG_BIN_PATH}/clang" --version | sha256sum | cut -c1-8)"
+            echo "⚠️ Could not extract clang-r version, using hash: $short"
+          else
+            echo "✅ Clang version fingerprint: $short"
+          fi
 
-          echo "CCACHE_DIR=$CCACHE_DIR" >> "$GITHUB_ENV"
-          echo "✅ ccache configured"
+          echo "CLANG_VERSION_SHORT=$short" >> "$GITHUB_ENV"
+          echo "::endgroup::"
+
+      - name: Set Cache Environment
+        run: |
+          set -euo pipefail
+          echo "::group::Configure ccache environment"
+
+          CACHE_DIR="$HOME/.ccache"
+          echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+
+          mkdir -p "$CACHE_DIR"
+
+          echo "Cache configuration:"
+          echo "  Directory: $CACHE_DIR"
+          echo "  Max size: 1G"
           echo "::endgroup::"
 
       - name: Cache ccache
@@ -238,176 +275,497 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.ccache
-          key: ccache-stock-${{ env.DEVICE_MODEL }}-${{ env.OS_VERSION }}-${{ env.KERNEL_FULL_VER }}
+          key: ccache-stock-v1-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
           restore-keys: |
-            ccache-stock-${{ env.DEVICE_MODEL }}-${{ env.OS_VERSION }}-
-            ccache-stock-${{ env.DEVICE_MODEL }}-
+            ccache-stock-v1-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-${{ env.KERNEL_FULL_VER }}-
+            ccache-stock-v1-${{ env.OP_MODEL }}-${{ env.OP_OS_VERSION }}-
 
-      - name: Disable ccache for clean build
+      - name: Configure ccache
+        run: |
+          set -euo pipefail
+          echo "::group::Configure ccache for maximum performance"
+
+          export CCACHE_DIR="$HOME/.ccache"
+          export CCACHE_MAXSIZE="1G"
+
+          ccache -M "$CCACHE_MAXSIZE"
+
+          export CCACHE_COMPILERCHECK="content"
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export CCACHE_NOHASHDIR="true"
+
+          ccache -o compression=true
+          ccache -o compression_level=3
+          ccache -o direct_mode=true
+          ccache -o hash_dir=false
+          ccache -o file_clone=true
+          ccache -o inode_cache=true
+          ccache -o umask=002
+
+          if ccache --help 2>&1 | grep -q 'depend_mode'; then
+            ccache -o depend_mode=true
+          fi
+
+          ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
+
+          export CCACHE_IGNOREOPTIONS="--sysroot*"
+
+          {
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_IGNOREOPTIONS=$CCACHE_IGNOREOPTIONS"
+          } >> "$GITHUB_ENV"
+
+          echo "✅ ccache configured for production"
+          echo "::endgroup::"
+
+      - name: Handle Clean Build Option
         if: ${{ inputs.clean_build == true }}
-        run: echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+        run: |
+          echo "::group::Clean build requested"
+          echo "⚠️ Clean build mode enabled - ccache will be bypassed"
+          echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+          echo "✅ ccache disabled for clean build"
+          echo "::endgroup::"
 
       - name: Clean Up ABI Protected Exports
         run: |
-          cd "$KERNEL_PLATFORM"
+          cd "$KERNEL_PLATFORM_FOLDER"
           rm -f common/android/abi_gki_protected_exports_* || true
           rm -f msm-kernel/android/abi_gki_protected_exports_* || true
           sed -i 's/protected_modules = \[.*\]/protected_modules = []/' common/modules.bzl || true
+          df -h
 
-      - name: 🔨 Build Kernel
-        id: build
+      - name: Add Build based configs
         run: |
           set -euo pipefail
-          echo "::group::Build Kernel"
+          echo "Add Build based configs"
+          cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+          CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
+          CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=n
+          CONFIG_OPTIMIZE_INLINING=y
+          CONFIG_FRAME_WARN=0
+          CONFIG_TRACEPOINTS=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          EOF
 
-          cd "$KERNEL_PLATFORM"
-          START_TIME=$(date +%s)
+      - name: Save Build Metadata
+        id: save_metadata
+        run: |
+          set -euo pipefail
+          echo "Save Build Metadata"
+          cd "$ARTIFACTS_FOLDER"
+          echo "kernel_version=${{ env.KERNEL_FULL_VER }}" >> "$GITHUB_OUTPUT"
+          echo "ksu_version=none" >> "$GITHUB_OUTPUT"
+          echo "ksu_type=stock" >> "$GITHUB_OUTPUT"
+          echo "susfs_version=none" >> "$GITHUB_OUTPUT"
 
-          # Set build environment
-          export PATH="$CLANG_BIN_PATH:$PATH"
-          export CC="ccache clang"
-          export LLVM=1
-          export LLVM_IAS=1
-          export ARCH=arm64
-          export SUBARCH=arm64
+      - name: Customize Kernel Branding
+        run: |
+          set -euo pipefail
+          echo "Customize Kernel Branding"
+          cd "$COMMON_KERNEL_FOLDER"
+          mkdir -p out
+          CUSTOM_LOCALVERSION="-${ANDROID_VER}-${OP_UNAME}"
+          echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
+
+      - name: Build Kernel
+        shell: bash
+        env:
+          PYTHONWARNINGS: "ignore:invalid escape sequence"
+        run: |
+          set -euo pipefail
+          echo "::group::Build kernel with ccache optimization"
+
+          cd "$COMMON_KERNEL_FOLDER"
+          : > "$COMMON_KERNEL_FOLDER/.scmversion"
+
+          export PYTHONWARNINGS="${PYTHONWARNINGS}"
+
+          echo "Getting last commit timestamp from kernel source..."
+          COMMIT_TIMESTAMP=$(git log -1 --format=%ct 2>/dev/null || echo "$(date +%s)")
+          COMMIT_DATE=$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u '+%Y-%m-%d %H:%M:%S')
+          COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+          WORKSPACE="${GITHUB_WORKSPACE}"
+          MAP="-fdebug-prefix-map=${WORKSPACE}=."
+          MPMAP="-fmacro-prefix-map=${WORKSPACE}=."
+          FPMAP="-ffile-prefix-map=${WORKSPACE}=."
+
+          export KCFLAGS="${KCFLAGS:-} $MAP $MPMAP $FPMAP -no-canonical-prefixes -fdiagnostics-color=never -Qunused-arguments -Wno-unused-command-line-argument -D__ANDROID_COMMON_KERNEL__"
+          export KCPPFLAGS="${KCPPFLAGS:-} $MAP $MPMAP $FPMAP"
+
+          export LLVM=1 LLVM_IAS=1
+          export ARCH=arm64 SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export PAHOLE="$KERNEL_PLATFORM_FOLDER/prebuilts/kernel-build-tools/linux-x86/bin/pahole"
+          export LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm
+          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-          export BUILD_USER="${{ env.BUILD_USER }}"
-          export BUILD_HOST="${{ env.BUILD_HOST }}"
-          export LTO="${{ env.LTO_TYPE }}"
-          export OPTIMIZE="${{ inputs.optimize_level }}"
+          set +u
+          source "$KERNEL_PLATFORM_FOLDER/build/kernel/_setup_env.sh" 2>/dev/null || true
+          set -u
 
-          # Build defconfig
-          python3 build/gki/build.py defconfig \
-            --kernel_dir common \
-            --out_dir out \
-            --gki_defconfig common/arch/arm64/configs/gki_defconfig
+          KERNEL_BUILD_DATE=$(date -u)
+          export SOURCE_DATE_EPOCH=$COMMIT_TIMESTAMP
+          export KBUILD_BUILD_TIMESTAMP="$KERNEL_BUILD_DATE"
+          export KBUILD_BUILD_USER="${BUILD_USER:-kernel}"
+          export KBUILD_BUILD_HOST="${BUILD_HOST:-kleaf}"
+          export KBUILD_BUILD_VERSION=1
 
-          # Build kernel
-          python3 build/gki/build.py build \
-            --kernel_dir common \
-            --out_dir out \
-            --lto "$LTO" \
-            --opt "$OPTIMIZE"
+          echo "📅 Build timestamp: $KBUILD_BUILD_TIMESTAMP (from commit $COMMIT_HASH)"
+          echo "🔢 SOURCE_DATE_EPOCH: $SOURCE_DATE_EPOCH"
+          echo "👤 Build user: $KBUILD_BUILD_USER"
+          echo "🖥️  Build host: $KBUILD_BUILD_HOST"
 
-          END_TIME=$(date +%s)
-          BUILD_TIME=$((END_TIME - START_TIME))
+          export CC="ccache clang"
+          export CXX="ccache clang++"
+          export HOSTCC="ccache clang"
+          export HOSTCXX="ccache clang++"
 
-          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+          BASE_PATH="/usr/lib/ccache:${CLANG_BIN_PATH}:${KERNEL_PLATFORM_FOLDER}/prebuilts/kernel-build-tools/linux-x86/bin/:${KERNEL_PLATFORM_FOLDER}/prebuilts/kernel-build-tools/linux_musl-x86/bin/"
+          export PATH="${BASE_PATH}:${PATH}"
 
-          echo "✅ Kernel built successfully in ${BUILD_TIME}s"
-          echo "::endgroup::"
-
-      - name: 📦 Prepare Artifacts
-        run: |
-          set -euo pipefail
-          echo "::group::Prepare artifacts"
-
-          ARTIFACTS_DIR="$GITHUB_WORKSPACE/artifacts"
-          mkdir -p "$ARTIFACTS_DIR"
-
-          cd "$KERNEL_PLATFORM"
-
-          # Copy kernel images
-          cp out/dist/Image "$ARTIFACTS_DIR/"
-          cp out/dist/Image.gz "$ARTIFACTS_DIR/" || true
-          cp out/dist/gz-dtb "$ARTIFACTS_DIR/" || true
-
-          # Copy kernel modules
-          if [ -d "out/dist/modules" ]; then
-            cp -r out/dist/modules "$ARTIFACTS_DIR/"
+          if [ "${{ inputs.clean_build }}" = "true" ]; then
+            echo "🧹 Clean build mode - ccache disabled"
+            export CCACHE_DISABLE=1
+          else
+            echo "🚀 ccache-accelerated build"
           fi
 
-          # Copy System.map and other files
-          cp out/dist/System.map "$ARTIFACTS_DIR/" || true
-          cp out/dist/vmlinux "$ARTIFACTS_DIR/" || true
+          OUT=out
+          mkdir -p "$OUT"
 
-          # Calculate SHA256
-          cd "$ARTIFACTS_DIR"
-          sha256sum Image > Image.sha256
+          echo "============================================"
+          echo "🔍 Compiler & ccache Verification"
+          echo "============================================"
+          echo "PATH: ${PATH:0:200}..."
+          echo "which clang: $(which clang)"
+          echo "CC: $CC"
+          echo "CXX: $CXX"
+          echo "CCACHE_BASEDIR: ${CCACHE_BASEDIR:-not set}"
+          echo ""
 
-          echo "✅ Artifacts prepared"
-          ls -la
+          if [ "${{ inputs.clean_build }}" != "true" ]; then
+            echo "ccache wrapper test:"
+            clang --version 2>&1 | head -n1 || true
+            echo ""
+            echo "ccache configuration:"
+            ccache -p | grep -E "(compression|direct_mode|readonly_direct|depend|sloppiness)" || true
+            echo ""
+            echo "ccache pre-build status:"
+            ccache -s | head -n 20
+          else
+            echo "⚠️ Clean build - ccache bypassed"
+          fi
+          echo "============================================"
+
+          make O="$OUT" gki_defconfig
+
+          LOCAL_LOCALVERSION="${CUSTOM_LOCALVERSION:--OP-STOCK}"
+          if [ -n "${LOCAL_LOCALVERSION:-}" ]; then
+            scripts/config --file "$OUT/.config" --set-str LOCALVERSION "${LOCAL_LOCALVERSION}"
+            scripts/config --file "$OUT/.config" -d LOCALVERSION_AUTO || true
+            sed -i 's/scm_version="$(scm_version --short)"/scm_version=""/' scripts/setlocalversion
+          fi
+
+          if [ "${{ inputs.optimize_level }}" = "O3" ]; then
+            scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE
+            scripts/config --file "$OUT/.config" -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
+            KCFLAGS_EXTRA="-O3"
+          else
+            scripts/config --file "$OUT/.config" -e CC_OPTIMIZE_FOR_PERFORMANCE
+            scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE_O3
+            KCFLAGS_EXTRA="-O2"
+          fi
+
+          case "${{ env.OP_LTO}}" in
+            "none")
+              scripts/config --file "$OUT/.config" -e LTO_CLANG
+              scripts/config --file "$OUT/.config" -e LTO_CLANG_NONE
+              scripts/config --file "$OUT/.config" -d LTO_CLANG_THIN
+              scripts/config --file "$OUT/.config" -d LTO_CLANG_FULL
+              ;;
+            "thin")
+              scripts/config --file "$OUT/.config" -e LTO_CLANG
+              scripts/config --file "$OUT/.config" -e LTO_CLANG_THIN
+              scripts/config --file "$OUT/.config" -d LTO_CLANG_NONE
+              scripts/config --file "$OUT/.config" -d LTO_CLANG_FULL
+              ;;
+            "full")
+              scripts/config --file "$OUT/.config" -e LTO_CLANG
+              scripts/config --file "$OUT/.config" -e LTO_CLANG_FULL
+              scripts/config --file "$OUT/.config" -d LTO_CLANG_NONE
+              scripts/config --file "$OUT/.config" -d LTO_CLANG_THIN
+              ;;
+            *)
+              echo "::error::Unsupported LTO option: ${{ env.OP_LTO}}"
+              exit 1
+              ;;
+          esac
+
+          make O="$OUT" olddefconfig
+
+          KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
+          KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
+
+          echo "============================================"
+          echo "🔧 Build Configuration"
+          echo "============================================"
+          echo "Device: ${OP_MODEL}"
+          echo "Kernel: ${KERNEL_FULL_VER}"
+          echo "Threads: $(nproc --all)"
+          echo "Optimization: ${{ inputs.optimize_level }}"
+          echo "KCFLAGS: ${KCFLAGS:0:150}..."
+          echo "KCPPFLAGS: ${KCPPFLAGS:0:150}..."
+          echo "Timestamp: $KBUILD_BUILD_TIMESTAMP"
+          echo "Workspace: $WORKSPACE"
+
+          if [ "${{ inputs.clean_build }}" != "true" ]; then
+            echo "ccache: ENABLED"
+            echo "  Dir: $CCACHE_DIR"
+            echo "  Base: $CCACHE_BASEDIR"
+            echo "  Max size: $CCACHE_MAXSIZE"
+            echo "  Compression: zstd level 3"
+            echo "  Features: readonly_direct, file_clone, inode_cache, depend"
+          else
+            echo "ccache: DISABLED (clean build)"
+          fi
+          echo "============================================"
+
+          if [ "${{ inputs.clean_build }}" != "true" ]; then
+            if [ ! -d "$CCACHE_DIR" ] || [ -z "$(find "$CCACHE_DIR" -type f 2>/dev/null | head -n1)" ]; then
+              echo "🔥 Priming cache with header preprocessing..."
+              make -C "$COMMON_KERNEL_FOLDER" O="$OUT" headers_install prepare 2>&1 | head -n 20 || true
+              echo ""
+            fi
+          fi
+
+          BUILD_START=$(date +%s)
+          set -o pipefail
+
+          make -j"$(nproc --all)" O="$OUT" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" 2>&1 | tee build.log
+
+          BUILD_END=$(date +%s)
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+
+          echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
+          echo "BUILD_END=$BUILD_END" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
+
+          IMG="$OUT/arch/arm64/boot/Image"
+          if [ ! -f "$IMG" ]; then
+            echo "::error::Kernel Image missing"
+            echo "::group::Last 100 lines of build log"
+            tail -n 100 build.log || echo "Build log not available"
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          IMG_SIZE=$(stat -c%s "$IMG")
+
+          echo "============================================"
+          echo "✅ Build Completed Successfully"
+          echo "============================================"
+          echo "Duration: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
+          echo "Image: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+
+          if [ "${{ inputs.clean_build }}" != "true" ]; then
+            echo ""
+            echo "📊 ccache Post-Build Statistics"
+            echo "============================================"
+            ccache -s
+          fi
+          echo "============================================"
+          echo "::endgroup::"
+
+      - name: 📊 ccache Post-Build Statistics
+        id: ccache_stats
+        if: ${{ always() && inputs.clean_build != 'true' }}
+        run: |
+          set -euo pipefail
+          echo "::group::ccache final statistics"
+
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+
+          echo "ccache Statistics"
+          ccache -s
+
+          STATS="$(ccache -s)"
+
+          CACHEABLE=$(echo "$STATS" | awk '/Cacheable calls:/ {
+            match($0, /[0-9]+/);
+            print substr($0, RSTART, RLENGTH)
+          }' | head -n1)
+
+          HITS=$(echo "$STATS" | awk '/^[[:space:]]*Hits:/ {
+            match($0, /[0-9]+/);
+            print substr($0, RSTART, RLENGTH)
+          }' | head -n1)
+
+          DIRECT=$(echo "$STATS" | awk '/Direct:/ {
+            match($0, /[0-9]+/);
+            print substr($0, RSTART, RLENGTH)
+          }' | head -n1)
+
+          if [ "${CACHEABLE:-0}" -gt 0 ]; then
+            HIT_RATE=$(awk -v h="${HITS:-0}" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
+            DIRECT_RATE=$(awk -v d="${DIRECT:-0}" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (d/c)*100}')
+          else
+            HIT_RATE="0.0"
+            DIRECT_RATE="0.0"
+          fi
+
+          echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
+          echo "direct_rate=${DIRECT_RATE}%" >> "$GITHUB_OUTPUT"
+
+          echo "::endgroup::"
+
+          echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ccache -s >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Collect Build Stats / Validate Image
+        id: collect_stats
+        run: |
+          set -euo pipefail
+          echo "::group::Collect Build stats"
+          IMG="$COMMON_KERNEL_FOLDER/out/arch/arm64/boot/Image"
+
+          if [ -f "$KERNEL_PLATFORM_FOLDER/out/$OP_ANDROID_VERSION-$OP_KERNEL_VERSION/dist/Image" ]; then
+            IMG="$KERNEL_PLATFORM_FOLDER/out/$OP_ANDROID_VERSION-$OP_KERNEL_VERSION/dist/Image"
+          elif [ -f "$KERNEL_PLATFORM_FOLDER/bazel-bin/common/kernel_aarch64/Image" ]; then
+            IMG="$KERNEL_PLATFORM_FOLDER/bazel-bin/common/kernel_aarch64/Image"
+          fi
+
+          if [ -f "$COMMON_KERNEL_FOLDER/build.log" ]; then
+            WARNINGS_COUNT="$(grep -ciE '\bwarning:' "$COMMON_KERNEL_FOLDER/build.log" || true)"
+            [ -n "$WARNINGS_COUNT" ] || WARNINGS_COUNT="0"
+          else
+            WARNINGS_COUNT="0"
+          fi
+
+          if [ ! -f "$IMG" ]; then
+            echo "::error::Kernel Image not found at: $IMG"
+            exit 1
+          fi
+
+          if ! file "$IMG" | grep -qi 'ARM64'; then
+            echo "::error::Image is not ARM64 format"
+            file "$IMG"
+            exit 1
+          fi
+
+          IMG_SIZE=$(stat -c %s "$IMG")
+          MIN_SIZE=6102400
+          if [ "$IMG_SIZE" -lt "$MIN_SIZE" ]; then
+            echo "::error::Image size too small: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+            exit 1
+          fi
+
+          IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
+          BUILD_TIME="${BUILD_TIME:-0}"
+
+          KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1)
+          echo "Kernel Uname: $KERNEL_UNAME"
+          echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
+
+          printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+          printf 'image_sha256=%s\n' "$IMG_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'build_time=%s\n' "$BUILD_TIME" >> "$GITHUB_OUTPUT"
+
+          echo "✅ Validation passed:"
+          echo "   - Warnings: $WARNINGS_COUNT"
+          echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+          echo "   - SHA256: $IMG_SHA256"
+          echo "   - Build time: ${BUILD_TIME}s"
           echo "::endgroup::"
 
       - name: 📥 Clone AnyKernel3
         run: |
           git clone --depth=1 -b gki-2.0 https://github.com/TheWildJames/AnyKernel3.git AnyKernel3
 
-      - name: 📦 Create Flashable ZIP
+      - name: Create Kernel ZIP
         id: create_zip
         run: |
           set -euo pipefail
-          echo "::group::Create flashable ZIP"
+          echo "::group::Create kernel ZIP package"
+
+          IMAGE_PATH="$COMMON_KERNEL_FOLDER/out/arch/arm64/boot/Image"
+
+          if [ -f "$KERNEL_PLATFORM_FOLDER/out/$OP_ANDROID_VERSION-$OP_KERNEL_VERSION/dist/Image" ]; then
+            IMAGE_PATH="$KERNEL_PLATFORM_FOLDER/out/$OP_ANDROID_VERSION-$OP_KERNEL_VERSION/dist/Image"
+          elif [ -f "$KERNEL_PLATFORM_FOLDER/bazel-bin/common/kernel_aarch64/Image" ]; then
+            IMAGE_PATH="$KERNEL_PLATFORM_FOLDER/bazel-bin/common/kernel_aarch64/Image"
+          fi
 
           cd AnyKernel3
 
-          # Copy kernel image
-          cp "$GITHUB_WORKSPACE/artifacts/Image" ./
+          cp "$IMAGE_PATH" ./
 
-          # Create info file
-          cat > info.txt << EOF
-          Device: ${{ env.DEVICE_MODEL }}
-          OS Version: ${{ env.OS_VERSION }}
-          Kernel Version: ${{ env.KERNEL_FULL_VER }}
-          Clang: ${{ env.CLANG_VERSION }}
-          Build Time: ${{ steps.build.outputs.build_time }}s
-          Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          Build Type: Stock (No KernelSU)
-          EOF
-
-          # Update anykernel3 info
-          sed -i "s/string=.*;/string=${{ env.DEVICE_MODEL }} Stock Kernel ${{ env.KERNEL_FULL_VER }};/g" anykernel3/anykernel3.dtb
-
-          # Create ZIP
-          ZIP_NAME="${{ env.DEVICE_MODEL }}_stock_${{ env.OS_VERSION }}_$(date +%Y%m%d).zip"
-          zip -r "../$ZIP_NAME" . -x ".git/*" -x "*.md"
+          ZIP_NAME="${OP_MODEL}_stock_${OP_OS_VERSION}_$(date +%Y%m%d_%H%M%S).zip"
+          zip -r "../$ZIP_NAME" . -x ".git/*" -x "*.md" -x "README"
 
           cd ..
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
 
-          echo "✅ Created $ZIP_NAME ($(du -h "$ZIP_NAME" | cut -f1))"
+          ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
+          echo "✅ Created $ZIP_NAME ($(numfmt --to=iec-i --suffix=B "$ZIP_SIZE"))"
           echo "::endgroup::"
 
       - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.DEVICE_MODEL }}-stock-kernel
+          name: ${{ env.OP_MODEL }}-stock-kernel
           path: ${{ env.ZIP_NAME }}
           retention-days: 7
 
-      - name: 📊 Build Summary
+      - name: 📊 Job Summary
         if: always()
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
 
-          ## 🎯 Stock Kernel Build Summary
+          ### ${{ env.OP_MODEL }} (${{ env.OP_OS_VERSION }}) - ${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}
 
-          **Device:** ${{ env.DEVICE_MODEL }}
-          **OS Version:** ${{ env.OS_VERSION }}
-          **Kernel Version:** ${{ env.KERNEL_FULL_VER }}
-          **Clang Version:** ${{ env.CLANG_VERSION }}
+          **Kernel:** ${{ env.KERNEL_FULL_VER }}
 
-          ### Build Configuration
-          - **Optimization:** ${{ inputs.optimize_level }}
-          - **LTO:** ${{ env.LTO_TYPE }}
-          - **Clean Build:** ${{ inputs.clean_build }}
-          - **Build Time:** ${{ steps.build.outputs.build_time }}s
-
-          ### Output
-          - **ZIP:** \`${{ env.ZIP_NAME }}\`
+          | Metric | Value |
+          |--------|-------|
+          | **Kernel** | ${{ env.KERNEL_FULL_VER }} |
+          | **Build Type** | Stock (No KernelSU) |
+          | **Build Time** | ${{ steps.collect_stats.outputs.build_time }}s |
+          | **SHA256** | \`${{ steps.collect_stats.outputs.image_sha256 }}\` |
+          | **Warnings** | ${{ steps.collect_stats.outputs.warnings_count }} |
+          | **Optimization** | ${{ inputs.optimize_level }} |
+          | **LTO** | ${{ env.OP_LTO }} |
+          | **Clean Build** | ${{ inputs.clean_build }} |
 
           EOF
 
-      - name: 🧹 Cleanup
+      - name: 🧹 Final Cleanup
         if: always()
         run: |
-          sudo rm -rf "$GITHUB_WORKSPACE/kernel_build" || true
+          echo "::group::Cleanup"
+          sudo rm -rf "$CONFIG_FOLDER" || true
           sudo rm -rf "$GITHUB_WORKSPACE/out" || true
+          sudo rm -rf "$GITHUB_WORKSPACE/AnyKernel3" || true
           sudo rm -rf /tmp/* || true
+
+          if command -v ccache >/dev/null 2>&1; then
+            echo ""
+            echo "📊 ccache statistics after build:"
+            ccache -s
+          fi
+
+          echo ""
+          echo "💽 Final disk usage:"
           df -h /
+          echo "::endgroup::"
 
   release:
     needs: [build]
@@ -425,42 +783,74 @@ jobs:
           name: OP13-PJZ-stock-kernel
           path: ./artifacts
 
-      - name: 🏷️ Create Tag
-        run: |
-          TAG="stock-v$(date +%Y%m%d-%H%M%S)"
-          git tag "$TAG"
-          git push origin "$TAG"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-
-      - name: 🚀 Create Release
+      - name: 🏷️ Generate and Create New Tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cat > release_notes.md << 'EOF'
+          BASE_TAG="stock-v1.0.0-r0"
+          LATEST_TAG=$(gh api repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/tags --jq '.[0].name' 2>/dev/null || echo "")
+
+          if [ -z "$LATEST_TAG" ] || [[ ! "$LATEST_TAG" =~ ^stock-v ]]; then
+            LATEST_TAG="$BASE_TAG"
+          else
+            LATEST_TAG=$(printf "%s\n%s\n" "$LATEST_TAG" "$BASE_TAG" | sort -rV | head -n1)
+          fi
+
+          NEW_TAG=$(echo "$LATEST_TAG" | awk -F'-r' '{suffix=$2; if (!suffix) suffix=0; suffix++; printf "%s-r%d", $1, suffix}')
+          echo "New tag: $NEW_TAG"
+          echo "NEW_TAG=${NEW_TAG}" >> $GITHUB_ENV
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+
+      - name: 🚀 Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > release_notes.md << EOF
           # 📱 OnePlus 13 PJZ Stock Kernel
 
           > **Build Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          > **Build ID:** \`${{ github.run_id }}\`
 
-          ## 📋 Details
-          - **Device:** OP13-PJZ (Sun/SM8750)
-          - **OS:** OxygenOS 15
-          - **Kernel:** ${{ needs.build.outputs.kernel_version }}
-          - **Type:** Stock (No KernelSU/SUSFS modifications)
+          ---
 
-          ## ⚠️ Disclaimer
-          This is a **stock kernel** without any modifications.
-          - No KernelSU/SUSFS
-          - No BBG/BBR patches
-          - Original OnePlus kernel configuration
+          ## 📋 Build Information
+
+          | Component | Version |
+          |-----------|---------|
+          | **Device** | OP13-PJZ (Sun/SM8750) |
+          | **OS Version** | OOS15 |
+          | **Kernel Version** | ${{ needs.build.outputs.kernel_version }} |
+          | **Build Type** | Stock (No KernelSU/SUSFS) |
+
+          ---
+
+          ## ⚠️ Important Notes
+
+          This is a **stock kernel** without any modifications:
+          - ❌ No KernelSU / KernelSU Next
+          - ❌ No SUSFS hiding features
+          - ❌ No BBG (Baseband Guard)
+          - ❌ No BBR TCP optimization
+          - ❌ No additional performance patches
+
+          This kernel is identical to the original OnePlus kernel.
+
+          ---
 
           ## 📥 Installation
+
           1. Download the ZIP file
           2. Flash via Kernel Flasher or custom recovery
           3. Reboot
 
+          ---
+
+          **⚡ Built with GitHub Actions**
+
           EOF
 
-          gh release create "${{ env.TAG }}" \
+          gh release create "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
             --title "Stock Kernel ${{ needs.build.outputs.kernel_version }}" \
             --notes-file release_notes.md \
@@ -472,9 +862,8 @@ jobs:
 
           ---
 
-          ## 🎉 Release Created
+          ## 🎉 Release Created Successfully
 
-          **Tag:** \`${{ env.TAG }}\`
-          **URL:** ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.TAG }}
+          **Tag:** [\`${{ env.NEW_TAG }}\`](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }})
 
           EOF
