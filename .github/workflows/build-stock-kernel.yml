@@ -12,10 +12,13 @@ on:
         required: true
         type: choice
         options:
-          - OP13-PJZ
-          - OP13-CPH
-          - Both
-        default: OP13-PJZ
+          - OP13-PJZ (OOS15)
+          - OP13-CPH (OOS15)
+          - OP13 (OOS16)
+          - All OOS15
+          - All OOS16
+          - All
+        default: OP13-PJZ (OOS15)
       make_release:
         description: 'Create a release?'
         required: true
@@ -44,20 +47,41 @@ jobs:
         run: |
           input="${{ github.event.inputs.device_model }}"
 
-          if [ "$input" = "Both" ]; then
-            devices='[{"model":"OP13-PJZ","soc":"sun","manifest":"oneplus_13_v.xml"},{"model":"OP13-CPH","soc":"sun","manifest":"oneplus_13_global_v.xml"}]'
-          elif [ "$input" = "OP13-PJZ" ]; then
-            devices='[{"model":"OP13-PJZ","soc":"sun","manifest":"oneplus_13_v.xml"}]'
-          elif [ "$input" = "OP13-CPH" ]; then
-            devices='[{"model":"OP13-CPH","soc":"sun","manifest":"oneplus_13_global_v.xml"}]'
-          else
-            echo "::error::Unknown device: $input"
-            exit 1
-          fi
+          # Device configurations
+          # OOS15 devices
+          PJZ_OOS15='{"model":"OP13-PJZ","soc":"sun","manifest":"oneplus_13_v.xml","os_version":"OOS15"}'
+          CPH_OOS15='{"model":"OP13-CPH","soc":"sun","manifest":"oneplus_13_global_v.xml","os_version":"OOS15"}'
+          # OOS16 device
+          OP13_OOS16='{"model":"OP13","soc":"sun","manifest":"oneplus_13_w.xml","os_version":"OOS16"}'
+
+          case "$input" in
+            "OP13-PJZ (OOS15)")
+              devices="[$PJZ_OOS15]"
+              ;;
+            "OP13-CPH (OOS15)")
+              devices="[$CPH_OOS15]"
+              ;;
+            "OP13 (OOS16)")
+              devices="[$OP13_OOS16]"
+              ;;
+            "All OOS15")
+              devices="[$PJZ_OOS15,$CPH_OOS15]"
+              ;;
+            "All OOS16")
+              devices="[$OP13_OOS16]"
+              ;;
+            "All")
+              devices="[$PJZ_OOS15,$CPH_OOS15,$OP13_OOS16]"
+              ;;
+            *)
+              echo "::error::Unknown device: $input"
+              exit 1
+              ;;
+          esac
 
           count=$(echo "$devices" | jq 'length')
           echo "✅ Selected $count device(s)"
-          echo "Devices: $(echo "$devices" | jq -r '.[].model' | tr '\n' ' ')"
+          echo "Devices: $(echo "$devices" | jq -r '.[] | "\(.model) (\(.os_version))"' | tr '\n' ' ')"
 
           echo "matrix={\"include\":$(echo "$devices" | jq -c '.')}" >> "$GITHUB_OUTPUT"
           echo "count=$count" >> "$GITHUB_OUTPUT"
@@ -71,14 +95,15 @@ jobs:
     outputs:
       kernel_version: ${{ steps.save_metadata.outputs.kernel_version }}
       device_model: ${{ matrix.model }}
+      os_version: ${{ matrix.os_version }}
     env:
       OP_MODEL: ${{ matrix.model }}
       OP_SOC: ${{ matrix.soc }}
       OP_MANIFEST: ${{ matrix.manifest }}
+      OP_OS_VERSION: ${{ matrix.os_version }}
       OP_BRANCH: wild/sm8750
       OP_ANDROID_VERSION: android15
       OP_KERNEL_VERSION: "6.6"
-      OP_OS_VERSION: OOS15
       OP_LTO: thin
       OP_RUST_BUILD: false
       OP_UNAME: OP-STOCK
@@ -148,7 +173,8 @@ jobs:
 
           # Copy manifest
           mkdir -p .repo/manifests
-          cp "../manifests/oos15/$OP_MANIFEST" .repo/manifests/temp_manifest.xml
+          OS_LOWER=$(echo "$OP_OS_VERSION" | tr '[:upper:]' '[:lower:]')
+          cp "../manifests/${OS_LOWER}/$OP_MANIFEST" .repo/manifests/temp_manifest.xml
 
           # Initialize repo
           "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
