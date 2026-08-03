@@ -321,16 +321,20 @@ jobs:
           patch -p1 --forward < "$P/unicode_bypass_fix_6.1+.patch"
           echo "✅ Unicode fix applied"
 
-      - name: Apply Droidspaces
+      - name: Add Droidspaces support
         if: ${{ inputs.ds }}
         run: |
+          echo "::group::Add Droidspaces Support"
           set -euo pipefail
           cd "$COMMON_KERNEL_DIR"
-          P="$GITHUB_WORKSPACE/kernel_patches/common/droidspaces"
-          patch -p1 --forward < "$P/fix_sysvipc_kabi_a16-6.12.patch"
-          patch -p1 --forward < "$P/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"
-          D=arch/arm64/configs/gki_defconfig
-          cat >> "$D" <<EOF
+
+          echo "Applying patch to enable SYSVIPC without breaking ABI"
+          patch -p1 --forward < "$KERNEL_PATCHES_DIR/common/droidspaces/fix_sysvipc_kabi_a16-6.12.patch"
+
+          echo "Patch to fix kernel panic caused by oplus_bsp_midas"
+          patch -p1 --forward < "$KERNEL_PATCHES_DIR/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"
+
+          cat >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig" <<EOF
           CONFIG_SYSVIPC=y
           CONFIG_DEVTMPFS=y
           CONFIG_PID_NS=y
@@ -340,13 +344,17 @@ jobs:
           CONFIG_NETFILTER_XT_MATCH_RECENT=y
           CONFIG_USER_NS=y
           EOF
-          if ! grep -q 'EXPORT_SYMBOL.*put_ipc_ns' ipc/namespace.c; then
-            echo -e '\nEXPORT_SYMBOL_GPL(put_ipc_ns);' >> ipc/namespace.c
+
+          echo "Add IPC NS missing symbols for rust binder"
+          if ! grep -q 'EXPORT_SYMBOL.*put_ipc_ns' "$COMMON_KERNEL_DIR/ipc/namespace.c"; then
+            echo -e '\nEXPORT_SYMBOL_GPL(put_ipc_ns);' >> "$COMMON_KERNEL_DIR/ipc/namespace.c"
           fi
-          if ! grep -q 'EXPORT_SYMBOL.*init_ipc_ns' ipc/msgutil.c; then
-            echo -e '\nEXPORT_SYMBOL_GPL(init_ipc_ns);' >> ipc/msgutil.c
+          if ! grep -q 'EXPORT_SYMBOL.*init_ipc_ns' "$COMMON_KERNEL_DIR/ipc/msgutil.c"; then
+            echo -e '\nEXPORT_SYMBOL_GPL(init_ipc_ns);' >> "$COMMON_KERNEL_DIR/ipc/msgutil.c"
           fi
-          echo "✅ Droidspaces applied"
+
+          echo "✅ Droidspaces Support applied"
+          echo "::endgroup::"
 
       - name: Add Kernel Configs
         run: |
