@@ -258,20 +258,42 @@ jobs:
 
       - name: Apply Fake config.gz Patch
         run: |
+          set -euo pipefail
           cd "$COMMON_KERNEL_DIR"
-          patch -p1 < "$GITHUB_WORKSPACE/kernel_patches/common/fake_config.patch"
+          patch -p1 < "$KERNEL_PATCHES_DIR/common/fake_config.patch"
 
-      - name: Apply BBG
+          OPTIONS=()
+          if [ "${{ inputs.bbr }}" = "true" ] || [ "${{ inputs.bbr3 }}" = "true" ]; then
+            OPTIONS+=("CONFIG_TCP_CONG_ADVANCED")
+          fi
+          if [ "${{ inputs.ip_set }}" = "true" ]; then
+            OPTIONS+=("CONFIG_IP6_NF_NAT")
+          fi
+          CONFIG_STRING="${OPTIONS[*]}"
+          echo "CONFIG_FAKE_DISABLE=${CONFIG_STRING}" >> $GITHUB_ENV
+
+      - name: Add BBG
         if: ${{ inputs.bbg }}
         run: |
           set -euo pipefail
+          echo "::group::Add BBG LSM"
           cd "$KERNEL_PLATFORM_DIR"
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash -s main || true
-          echo "CONFIG_BBG=y" >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig"
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' "$COMMON_KERNEL_DIR/security/Kconfig"
-          PATCHES="$GITHUB_WORKSPACE/kernel_patches"
-          patch -p1 < "$PATCHES/common/bbg/0001-Enable-abl-and-efisp-flashing-for-efisp-exploit-devices.patch"
-          echo "✅ BBG applied"
+          echo "Adding BBG..."
+          if ! wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash -s main; then
+            echo "::warning::BBG setup script failed, continuing anyway"
+          fi
+          echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
+
+          case "wild/sm8850" in
+            wild/sm8850|wild/sm8845)
+              echo "Applying BBG efisp abl whitelist patch"
+              patch -p1 < "$KERNEL_PATCHES_DIR/common/bbg/0001-Enable-abl-and-efisp-flashing-for-efisp-exploit-devices.patch"
+              ;;
+          esac
+
+          echo "✅ BBG LSM added"
+          echo "::endgroup::"
 
       - name: Apply Optimisations
         if: ${{ inputs.opt }}
@@ -291,27 +313,41 @@ jobs:
           cat "$P/clear_page_16bytes_align.patch" | sed -e 's/SYM_FUNC_START_PI(clear_page)/SYM_FUNC_START_PI(__pi_clear_page)/' | patch -p1 -F3 --forward
           echo "✅ Optimisations applied"
 
-      - name: Apply NTSync
+      - name: Apply NTSync Patch
         if: ${{ inputs.ntsync }}
         run: |
+          echo "::group::Apply NTSync patch"
           set -euo pipefail
           cd "$COMMON_KERNEL_DIR"
-          NTSYNC="$GITHUB_WORKSPACE/kernel_patches/common/ntsync"
-          rm -f include/uapi/linux/ntsync.h drivers/misc/ntsync.c
+          NTSYNC_FOLDER="$KERNEL_PATCHES_DIR/common/ntsync"
+          GKI_KEY="${ANDROID_VER}-${KERNEL_VER}"
+
           NTSYNC_PATCH=""
-          if [ -f "$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}_A16.patch" ]; then
-            NTSYNC_PATCH="$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}_A16.patch"
-          elif [ -f "$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}.patch" ]; then
-            NTSYNC_PATCH="$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}.patch"
-          fi
-          if [ -n "$NTSYNC_PATCH" ]; then
-            patch -p1 --forward < "$NTSYNC_PATCH"
-            patch -p1 --forward < "$NTSYNC/ntsync_base.patch"
-            echo "CONFIG_NTSYNC=y" >> arch/arm64/configs/gki_defconfig
-            echo "✅ NTSync applied"
+          if [ -f "$NTSYNC_FOLDER/ntsync_compat_${GKI_KEY}_A16.patch" ]; then
+            NTSYNC_PATCH="$NTSYNC_FOLDER/ntsync_compat_${GKI_KEY}_A16.patch"
+          elif [ -f "$NTSYNC_FOLDER/ntsync_compat_${GKI_KEY}.patch" ]; then
+            NTSYNC_PATCH="$NTSYNC_FOLDER/ntsync_compat_${GKI_KEY}.patch"
           else
-            echo "::warning::NTSync patch not found, skipping"
+            echo "::error::NTSync patch not found for ${GKI_KEY}"
+            exit 1
           fi
+
+          echo "Using patch: $(basename $NTSYNC_PATCH)"
+          if [ "$ANDROID_VER" = "android16" ] && [ "$KERNEL_VER" = "6.12" ]; then
+            echo "Removing pre-existing ntsync files for android16-6.12"
+            rm -f include/uapi/linux/ntsync.h
+            rm -f drivers/misc/ntsync.c
+          fi
+
+          echo "Patching $(basename $NTSYNC_PATCH)!"
+          patch -p1 --forward < "$NTSYNC_PATCH"
+          echo "Patching ntsync_base!"
+          patch -p1 --forward < "$NTSYNC_FOLDER/ntsync_base.patch"
+          cat >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig" <<EOF
+          CONFIG_NTSYNC=y
+          EOF
+          echo "✅ NTSync patch applied"
+          echo "::endgroup::"
 
       - name: Apply Unicode Fix
         if: ${{ inputs.unicode }}
@@ -432,13 +468,56 @@ jobs:
           CONFIG_IP6_NF_TARGET_MASQUERADE=y
           EOF
 
-      - name: Vendor Module Blacklist
+      - name: Disable Vendor / Kernel Modules
         run: |
           set -euo pipefail
+          echo "Disabling Vendor / Kernel Modules"
           cd "$COMMON_KERNEL_DIR"
+
+          RISKY_MODULES=("coresight" "rust_binder" "msm_kgsl" "camera" "oplusboot" "rmnet_wlan" "rmnet_core" "msm_drm" "cnss2" "oplus_chg_v2" "reboot_mode" "rfkill" "bootloader_log")
+
           BLACKLIST="oplus_security_guard,oplus_qr_scan,oplus_score,oplus_vip_task,oplus_dns_cache,oplus_network_linkpower_module,oplus_data_module,oplus_secure_harden,oplus_security_keventupload,oplus_secure_guard_new,oplus_secure_guard,coresight_tpda,coresight_tgu,coresight_trace_noc,coresight_cti,coresight_qmi,coresight_dummy,coresight_remote_etm,coresight_tpdm,coresight_uetm,coresight_stm,coresight_tmc_sec,f_fs_ipc_log,qti_battery_debug,rdbg,stm_heartbeat,stm_p_ost,stm_core,stm_ftrace,stm_console,spmi_pmic_arb_debug"
-          echo "CONFIG_DEBLOAT_VENDOR_MODULES=\"${BLACKLIST}\"" >> arch/arm64/configs/gki_defconfig
-          patch -p1 < "$GITHUB_WORKSPACE/kernel_patches/common/vendor_modules/0001-Support-conditional-vendor-modules-blacklisting-6.1-and-above.patch"
+
+          declare -a modules=()
+          IFS=',' read -ra ADDR <<< "$BLACKLIST"
+          for mod in "${ADDR[@]}"; do
+            [[ -n "$mod" ]] && modules+=("$mod")
+          done
+
+          if [ "${{ inputs.bbr }}" = "true" ] || [ "${{ inputs.bbr3 }}" = "true" ]; then
+            if [[ ! " ${modules[*]} " =~ " oplus_network_tuning " ]]; then
+              modules+=("oplus_network_tuning")
+            fi
+            if [[ ! " ${modules[*]} " =~ " oplus_networks_tuning " ]]; then
+              modules+=("oplus_networks_tuning")
+            fi
+          fi
+
+          declare -a validated_modules=()
+          for mod in "${modules[@]}"; do
+            is_risky=false
+            for risky in "${RISKY_MODULES[@]}"; do
+              if [ "$mod" = "$risky" ]; then
+                is_risky=true
+                echo "WARNING: Blocked attempt to blacklist protected module: $mod"
+                break
+              fi
+            done
+            if [ "$is_risky" = false ]; then
+              validated_modules+=("$mod")
+            fi
+          done
+
+          if [ ${#validated_modules[@]} -gt 0 ]; then
+            RAW_JOINED=$(IFS=,; echo "${validated_modules[*]}")
+            RESULT_LIST="\"${RAW_JOINED}\""
+          else
+            RESULT_LIST='""'
+          fi
+
+          echo "Disabling following kernel modules: ${RESULT_LIST}"
+          echo "CONFIG_DEBLOAT_VENDOR_MODULES=${RESULT_LIST}" >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig"
+          patch -p1 < "$KERNEL_PATCHES_DIR/common/vendor_modules/0001-Support-conditional-vendor-modules-blacklisting-6.1-and-above.patch"
           echo "✅ Module blacklist configured"
 
       - name: Set Build Identity
@@ -527,10 +606,10 @@ jobs:
 
           if [ "${{ inputs.debug }}" = "true" ]; then
             make V=1 LD="$(pwd)/ld-wrapper" HOSTLD="$(pwd)/ld-wrapper" -j"$(nproc --all)" O="$OUT" \
-              KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" Image modules 2>&1 | tee build.log
+              KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image modules 2>&1 | tee build.log
           else
             make LD="$(pwd)/ld-wrapper" HOSTLD="$(pwd)/ld-wrapper" -j"$(nproc --all)" O="$OUT" \
-              KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" Image 2>&1 | tee build.log
+              KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE" Image 2>&1 | tee build.log
           fi
 
           BUILD_END=$(date +%s)
