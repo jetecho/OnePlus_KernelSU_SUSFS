@@ -175,28 +175,51 @@ jobs:
       - name: Detect Rust & bindgen
         run: |
           set -euo pipefail
+          RUSTC_FOUND=false
+          BINDGEN_FOUND=false
+
           for base in "$KERNEL_PLATFORM_DIR/prebuilts" "$KERNEL_PLATFORM_DIR/prebuilts-master"; do
             [ -d "$base/rust/linux-x86" ] || continue
             latest=$(ls -d "$base/rust/linux-x86/1."* 2>/dev/null | sort -V | head -n1 || true)
             if [ -n "$latest" ] && [ -x "$latest/bin/rustc" ]; then
-              echo "$latest/bin" >> $GITHUB_PATH
-              RUSTC_VERSION=$("$latest/bin/rustc" --version | head -n1)
+              RUSTC_BIN="$latest/bin"
+              echo "$RUSTC_BIN" >> $GITHUB_PATH
+              echo "RUSTC=$RUSTC_BIN/rustc" >> "$GITHUB_ENV"
+              RUSTC_VERSION=$("$RUSTC_BIN/rustc" --version | head -n1)
               echo "RUSTC_VERSION=$RUSTC_VERSION" >> "$GITHUB_ENV"
+              RUSTC_FOUND=true
               echo "✅ Rust: $RUSTC_VERSION"
               break
             fi
           done
+          [ "$RUSTC_FOUND" = true ] || { echo "::error::No RUST toolchain found"; exit 1; }
+
           for base in "$KERNEL_PLATFORM_DIR/prebuilts" "$KERNEL_PLATFORM_DIR/prebuilts-master"; do
             [ -d "$base/clang-tools/linux-x86" ] || continue
             if [ -x "$base/clang-tools/linux-x86/bin/bindgen" ]; then
               chmod +x "$base/clang-tools/linux-x86/bin/bindgen"
-              echo "$base/clang-tools/linux-x86/bin" >> $GITHUB_PATH
-              BINDGEN_VERSION=$("$base/clang-tools/linux-x86/bin/bindgen" --version | head -n1)
+              BINDGEN_BIN="$base/clang-tools/linux-x86/bin"
+              echo "$BINDGEN_BIN" >> $GITHUB_PATH
+              echo "BINDGEN=$BINDGEN_BIN/bindgen" >> "$GITHUB_ENV"
+              BINDGEN_VERSION=$("$BINDGEN_BIN/bindgen" --version | head -n1)
               echo "BINDGEN_VERSION=$BINDGEN_VERSION" >> "$GITHUB_ENV"
+              BINDGEN_FOUND=true
               echo "✅ bindgen: $BINDGEN_VERSION"
               break
             fi
           done
+
+          if [ "$BINDGEN_FOUND" = false ]; then
+            echo "::warning::No bindgen found in prebuilts, installing via cargo"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            source $HOME/.cargo/env
+            cargo install bindgen-cli --version 0.69.5
+            BINDGEN=$(which bindgen)
+            BINDGEN_BIN=$(dirname $BINDGEN)
+            echo "$BINDGEN_BIN" >> $GITHUB_PATH
+            echo "BINDGEN=$BINDGEN" >> "$GITHUB_ENV"
+            bindgen --version
+          fi
 
       - name: Setup ccache
         uses: ./.github/actions/cache/restore
@@ -467,6 +490,15 @@ jobs:
           CONFIG_IP6_NF_NAT=y
           CONFIG_IP6_NF_TARGET_MASQUERADE=y
           EOF
+
+      - name: Test Rust & bindgen
+        run: |
+          set -euo pipefail
+          echo "::group::Test Rust & bindgen"
+          cd "$COMMON_KERNEL_DIR"
+          export RUSTTARGET="aarch64-linux-android"
+          make V=1 rustavailable
+          echo "::endgroup::"
 
       - name: Disable Vendor / Kernel Modules
         run: |
