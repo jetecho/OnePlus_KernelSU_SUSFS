@@ -131,6 +131,11 @@ jobs:
           echo "ARTIFACTS_DIR=$CONFIG_DIR/artifacts" >> "$GITHUB_ENV"
           mkdir -p "$CONFIG_DIR/artifacts"
 
+      - name: Apply Custom namespace.c
+        run: |
+          cp -f "$GITHUB_WORKSPACE/namespace.c" "$GITHUB_WORKSPACE/OP15/kernel_platform/common/fs/namespace.c"
+          echo "✅ Replaced fs/namespace.c with custom version"
+
       - name: Set PATH for build-tools
         run: |
           echo "${{ env.KERNEL_PLATFORM_DIR }}/prebuilts/kernel-build-tools/linux-x86/bin/" >> $GITHUB_PATH
