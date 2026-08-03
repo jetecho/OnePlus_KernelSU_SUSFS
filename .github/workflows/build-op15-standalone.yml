@@ -1,0 +1,631 @@
+name: Build OnePlus 15 Kernel (Standalone, No Root)
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      optimize_level:
+        description: "Compiler optimization level"
+        required: true
+        type: choice
+        options: [O2, O3]
+        default: O2
+      clean_build:
+        description: "Clean build (no ccache)"
+        type: boolean
+        default: false
+      debug:
+        description: "Enable debug mode"
+        type: boolean
+        default: false
+      build_timestamp:
+        description: "Custom kernel build timestamp (empty = current time)"
+        type: string
+        default: ''
+
+      # Feature toggles
+      opt:
+        description: "Performance optimisations"
+        type: boolean
+        default: true
+      bbg:
+        description: "Baseband Guard LSM"
+        type: boolean
+        default: true
+      bbr:
+        description: "BBR TCP congestion control"
+        type: boolean
+        default: true
+      bbr3:
+        description: "BBRv3 TCP congestion control"
+        type: boolean
+        default: false
+      ttl:
+        description: "TTL target support"
+        type: boolean
+        default: true
+      ip_set:
+        description: "IP Set & IPv6 NAT"
+        type: boolean
+        default: true
+      unicode:
+        description: "Unicode bypass fix"
+        type: boolean
+        default: true
+      ds:
+        description: "Droidspaces container support"
+        type: boolean
+        default: true
+      ntsync:
+        description: "NTSync Windows primitives"
+        type: boolean
+        default: true
+      lto:
+        description: "Link Time Optimization"
+        type: choice
+        options: [none, thin, full]
+        default: none
+
+jobs:
+  build:
+    name: build (OP15, canoe, wild/sm8850, android16-6.12, A16)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Disk Cleanup
+        uses: ./.github/actions/disk-cleanup
+
+      - name: Install Dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git curl ca-certificates build-essential clang lld flex bison \
+            libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
+            libxml2-utils rsync unzip dwarves file python3 ccache jq bc dos2unix kmod libdw-dev elfutils pigz aria2
+          sudo apt-get clean
+
+      - name: Setup repo tool
+        run: |
+          REPO=/usr/local/bin/repo
+          if [ ! -x "$REPO" ]; then
+            curl -s https://storage.googleapis.com/git-repo-downloads/repo -o "$REPO"
+            chmod +x "$REPO"
+          fi
+
+      - name: Configure git for repo
+        run: |
+          git config --global feature.manyFiles true
+          git config --global core.fsmonitor true
+          git config --global pack.sparse true
+
+      - name: Sync Kernel Source
+        run: |
+          set -euo pipefail
+          CONFIG_DIR="$GITHUB_WORKSPACE/OP15"
+          mkdir -p "$CONFIG_DIR"
+          cd "$CONFIG_DIR"
+
+          repo init -u https://github.com/${{ github.repository }} \
+            -m manifests/a16/oneplus_15_standalone.xml \
+            --depth=1 --no-clone-bundle
+
+          repo sync -j$(nproc --all) --no-clone-bundle --force-sync --fail-fast
+
+      - name: Set Directory Paths
+        run: |
+          CONFIG_DIR="$GITHUB_WORKSPACE/OP15"
+          echo "CONFIG_DIR=$CONFIG_DIR" >> "$GITHUB_ENV"
+          echo "KERNEL_PLATFORM_DIR=$CONFIG_DIR/kernel_platform" >> "$GITHUB_ENV"
+          echo "COMMON_KERNEL_DIR=$CONFIG_DIR/kernel_platform/common" >> "$GITHUB_ENV"
+          echo "ARTIFACTS_DIR=$CONFIG_DIR/artifacts" >> "$GITHUB_ENV"
+          mkdir -p "$CONFIG_DIR/artifacts"
+
+      - name: Set PATH for build-tools
+        run: |
+          echo "${{ env.KERNEL_PLATFORM_DIR }}/prebuilts/kernel-build-tools/linux-x86/bin/" >> $GITHUB_PATH
+          echo "${{ env.KERNEL_PLATFORM_DIR }}/prebuilts/kernel-build-tools/linux_musl-x86/bin/" >> $GITHUB_PATH
+
+      - name: Get Kernel Version
+        run: |
+          set -euo pipefail
+          cd "$COMMON_KERNEL_DIR"
+          BRANCH_LINE=$(grep '^[[:space:]]*BRANCH=' build.config.common || grep '^[[:space:]]*BRANCH=' build.config.constants)
+          ANDROID_VERSION="${BRANCH_LINE#*=}"
+          ANDROID_VERSION="${ANDROID_VERSION%-*}"
+          VERSION=$(grep '^VERSION *=' Makefile | awk '{print $3}')
+          PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
+          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
+          echo "ANDROID_VER=$ANDROID_VERSION" >> "$GITHUB_ENV"
+          echo "KERNEL_VER=$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
+          echo "KERNEL_FULL_VER=$ANDROID_VERSION-$VERSION.$PATCHLEVEL.$SUBLEVEL" >> "$GITHUB_ENV"
+          echo "Detected: $ANDROID_VERSION-$VERSION.$PATCHLEVEL.$SUBLEVEL"
+
+      - name: Detect Clang
+        run: |
+          set -euo pipefail
+          CLANG_FOUND=false
+          for base in "$KERNEL_PLATFORM_DIR/prebuilts" "$KERNEL_PLATFORM_DIR/prebuilts-master"; do
+            [ -d "$base/clang/host/linux-x86" ] || continue
+            latest=$(ls -d "$base/clang/host/linux-x86/clang-r"* 2>/dev/null | sort -V | tail -n1 || true)
+            if [ -n "$latest" ] && [ -x "$latest/bin/clang" ]; then
+              CLANG_BIN="$latest/bin"
+              CLANG_FOUND=true
+              break
+            fi
+          done
+          [ "$CLANG_FOUND" = true ] || { echo "::error::No clang found"; exit 1; }
+          echo "$CLANG_BIN" >> $GITHUB_PATH
+          CLANG_VERSION=$("$CLANG_BIN/clang" --version | head -n1)
+          short=$("$CLANG_BIN/clang" --version | sed -n '1s/.*clang-r\([0-9.]\+\).*/\1/p')
+          echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
+          echo "CLANG_VERSION_SHORT=$short" >> "$GITHUB_ENV"
+          echo "✅ Clang: $CLANG_VERSION"
+
+      - name: Detect Rust & bindgen
+        run: |
+          set -euo pipefail
+          for base in "$KERNEL_PLATFORM_DIR/prebuilts" "$KERNEL_PLATFORM_DIR/prebuilts-master"; do
+            [ -d "$base/rust/linux-x86" ] || continue
+            latest=$(ls -d "$base/rust/linux-x86/1."* 2>/dev/null | sort -V | head -n1 || true)
+            if [ -n "$latest" ] && [ -x "$latest/bin/rustc" ]; then
+              echo "$latest/bin" >> $GITHUB_PATH
+              RUSTC_VERSION=$("$latest/bin/rustc" --version | head -n1)
+              echo "RUSTC_VERSION=$RUSTC_VERSION" >> "$GITHUB_ENV"
+              echo "✅ Rust: $RUSTC_VERSION"
+              break
+            fi
+          done
+          for base in "$KERNEL_PLATFORM_DIR/prebuilts" "$KERNEL_PLATFORM_DIR/prebuilts-master"; do
+            [ -d "$base/clang-tools/linux-x86" ] || continue
+            if [ -x "$base/clang-tools/linux-x86/bin/bindgen" ]; then
+              chmod +x "$base/clang-tools/linux-x86/bin/bindgen"
+              echo "$base/clang-tools/linux-x86/bin" >> $GITHUB_PATH
+              BINDGEN_VERSION=$("$base/clang-tools/linux-x86/bin/bindgen" --version | head -n1)
+              echo "BINDGEN_VERSION=$BINDGEN_VERSION" >> "$GITHUB_ENV"
+              echo "✅ bindgen: $BINDGEN_VERSION"
+              break
+            fi
+          done
+
+      - name: Setup ccache
+        uses: ./.github/actions/cache/restore
+        if: ${{ !inputs.clean_build }}
+        with:
+          cache_path: ${{ github.workspace }}/.ccache
+          cache_key: standalone-v1-OP15-A16-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+          cache_bucket: "ccache-cache"
+          debug: ${{ inputs.debug }}
+          restore_keys: |
+            standalone-v1-OP15-A16-${{ env.KERNEL_FULL_VER }}-
+            standalone-v1-OP15-A16-
+
+      - name: Configure ccache env
+        run: |
+          CACHE_DIR="${{ github.workspace }}/.ccache"
+          mkdir -p "$CACHE_DIR"
+          export CCACHE_DIR="$CACHE_DIR"
+          export CCACHE_MAXSIZE=12G
+          export CCACHE_COMPRESSION=true
+          export CCACHE_COMPRESSION_LEVEL=3
+          export CCACHE_DIRECT=true
+          export CCACHE_FILE_CLONE=true
+          export CCACHE_INODE_CACHE=true
+          export CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
+          echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=12G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPRESSION=true" >> "$GITHUB_ENV"
+          echo "/usr/lib/ccache" >> $GITHUB_PATH
+          ccache -z
+
+      - name: Fetch kernel_patches
+        run: |
+          git clone --depth 1 https://github.com/WildKernels/kernel_patches.git \
+            "$GITHUB_WORKSPACE/kernel_patches"
+          echo "KERNEL_PATCHES_DIR=$GITHUB_WORKSPACE/kernel_patches" >> "$GITHUB_ENV"
+
+      - name: Clean ABI Protected Exports
+        run: |
+          cd "$KERNEL_PLATFORM_DIR"
+          rm -f common/android/abi_gki_protected_exports_* || true
+          sed -i 's/protected_modules = \[.*\]/protected_modules = []/' common/modules.bzl || true
+
+      - name: Apply Ptrace Fix (not needed for 6.12 but keep for completeness)
+        run: |
+          echo "Kernel 6.12 >= 5.16, ptrace fix not needed"
+
+      # --- Non-root patches ---
+
+      - name: Apply Other Patches (module overlay)
+        run: |
+          set -euo pipefail
+          cd "$COMMON_KERNEL_DIR"
+          PATCHES="$GITHUB_WORKSPACE/kernel_patches"
+          echo "Patching module overlay..."
+          patch -p1 < "$PATCHES/oneplus/module_overlay/0001-module-Add-module-intercept-and-overlay-mechanism-$ANDROID_VER-$KERNEL_VER.patch"
+          if [ -d "kernel/module/module_overlay/" ]; then
+            chmod +x ./kernel/module/module_overlay/convert_overlay.sh
+          elif [ -d "kernel/module_overlay/" ]; then
+            chmod +x ./kernel/module_overlay/convert_overlay.sh
+          fi
+          echo "✅ Module overlay patched"
+
+      - name: Apply Fake config.gz Patch
+        run: |
+          cd "$COMMON_KERNEL_DIR"
+          patch -p1 < "$GITHUB_WORKSPACE/kernel_patches/common/fake_config.patch"
+
+      # --- Feature patches ---
+
+      - name: Apply BBG
+        if: ${{ inputs.bbg }}
+        run: |
+          set -euo pipefail
+          cd "$KERNEL_PLATFORM_DIR"
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash -s main || true
+          echo "CONFIG_BBG=y" >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig"
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' "$COMMON_KERNEL_DIR/security/Kconfig"
+          PATCHES="$GITHUB_WORKSPACE/kernel_patches"
+          patch -p1 < "$PATCHES/common/bbg/0001-Enable-abl-and-efisp-flashing-for-efisp-exploit-devices.patch"
+          echo "✅ BBG applied"
+
+      - name: Apply Optimisations
+        if: ${{ inputs.opt }}
+        run: |
+          set -euo pipefail
+          cd "$COMMON_KERNEL_DIR"
+          P="$GITHUB_WORKSPACE/kernel_patches/common"
+          patch -p1 --forward < "$P/optimized_mem_operations.patch"
+          patch -p1 --forward < "$P/file_struct_8bytes_align.patch"
+          patch -p1 --forward < "$P/reduce_cache_pressure.patch"
+          patch -p1 --forward < "$P/mem_opt_prefetch.patch"
+          patch -p1 --forward < "$P/optimise_memcmp.patch"
+          patch -p1 --forward < "$P/minimise_wakeup_time.patch"
+          patch -p1 --forward < "$P/int_sqrt.patch"
+          patch -p1 --forward < "$P/force_tcp_nodelay.patch"
+          patch -p1 --forward < "$P/reduce_gc_thread_sleep_time.patch"
+          patch -p1 --forward < "$P/add_timeout_wakelocks_globally.patch"
+          patch -p1 --forward < "$P/f2fs_reduce_congestion.patch"
+          patch -p1 --forward < "$P/reduce_freeze_timeout.patch"
+          cat "$P/clear_page_16bytes_align.patch" | sed -e 's/SYM_FUNC_START_PI(clear_page)/SYM_FUNC_START_PI(__pi_clear_page)/' | patch -p1 -F3 --forward
+          patch -p1 --forward < "$P/add_limitation_scaling_min_freq.patch"
+          patch -p1 --forward < "$P/re_write_limitation_scaling_min_freq.patch"
+          patch -p1 --forward < "$P/adjust_cpu_scan_order.patch"
+          patch -p1 --forward < "$P/avoid_extra_s2idle_wake_attempts.patch"
+          patch -p1 --forward < "$P/disable_cache_hot_buddy.patch"
+          patch -p1 --forward < "$P/f2fs_enlarge_min_fsync_blocks.patch"
+          patch -p1 --forward < "$P/increase_ext4_default_commit_age.patch"
+          patch -p1 --forward < "$P/increase_sk_mem_packets.patch"
+          patch -p1 --forward < "$P/reduce_pci_pme_wakeups.patch"
+          patch -p1 --forward < "$P/silence_irq_cpu_logspam.patch"
+          patch -p1 --forward < "$P/silence_system_logspam.patch"
+          patch -p1 --forward < "$P/use_unlikely_wrap_cpufreq.patch"
+          echo "✅ Optimisations applied"
+
+      - name: Apply NTSync
+        if: ${{ inputs.ntsync }}
+        run: |
+          set -euo pipefail
+          cd "$COMMON_KERNEL_DIR"
+          NTSYNC="$GITHUB_WORKSPACE/kernel_patches/common/ntsync"
+          rm -f include/uapi/linux/ntsync.h drivers/misc/ntsync.c
+          NTSYNC_PATCH=""
+          if [ -f "$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}_A16.patch" ]; then
+            NTSYNC_PATCH="$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}_A16.patch"
+          elif [ -f "$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}.patch" ]; then
+            NTSYNC_PATCH="$NTSYNC/ntsync_compat_${ANDROID_VER}-${KERNEL_VER}.patch"
+          fi
+          if [ -n "$NTSYNC_PATCH" ]; then
+            patch -p1 --forward < "$NTSYNC_PATCH"
+            patch -p1 --forward < "$NTSYNC/ntsync_base.patch"
+            echo "CONFIG_NTSYNC=y" >> arch/arm64/configs/gki_defconfig
+            echo "✅ NTSync applied"
+          else
+            echo "::warning::NTSync patch not found, skipping"
+          fi
+
+      - name: Apply Unicode Fix
+        if: ${{ inputs.unicode }}
+        run: |
+          cd "$COMMON_KERNEL_DIR"
+          P="$GITHUB_WORKSPACE/kernel_patches/common"
+          patch -p1 --forward < "$P/unicode_bypass_fix_6.1+.patch"
+          echo "✅ Unicode fix applied"
+
+      - name: Apply Droidspaces
+        if: ${{ inputs.ds }}
+        run: |
+          set -euo pipefail
+          cd "$COMMON_KERNEL_DIR"
+          P="$GITHUB_WORKSPACE/kernel_patches/common/droidspaces"
+          patch -p1 --forward < "$P/fix_sysvipc_kabi_a16-6.12.patch"
+          patch -p1 --forward < "$P/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"
+          cat >> arch/arm64/configs/gki_defconfig <<'EOF'
+CONFIG_SYSVIPC=y
+CONFIG_DEVTMPFS=y
+CONFIG_PID_NS=y
+CONFIG_POSIX_MQUEUE=y
+CONFIG_NETFILTER_XT_TARGET_REJECT=y
+CONFIG_NETFILTER_XT_TARGET_LOG=y
+CONFIG_NETFILTER_XT_MATCH_RECENT=y
+CONFIG_USER_NS=y
+EOF
+          if ! grep -q 'EXPORT_SYMBOL.*put_ipc_ns' ipc/namespace.c; then
+            echo -e '\nEXPORT_SYMBOL_GPL(put_ipc_ns);' >> ipc/namespace.c
+          fi
+          if ! grep -q 'EXPORT_SYMBOL.*init_ipc_ns' ipc/msgutil.c; then
+            echo -e '\nEXPORT_SYMBOL_GPL(init_ipc_ns);' >> ipc/msgutil.c
+          fi
+          echo "✅ Droidspaces applied"
+
+      - name: Add Kernel Configs (Network + TMPFS + Build)
+        run: |
+          cd "$COMMON_KERNEL_DIR"
+          D="arch/arm64/configs/gki_defconfig"
+          # Build base
+          cat >> "$D" <<'EOF'
+CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
+CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=n
+CONFIG_OPTIMIZE_INLINING=y
+CONFIG_FRAME_WARN=0
+CONFIG_TRACEPOINTS=y
+EOF
+          # TMPFS
+          cat >> "$D" <<'EOF'
+CONFIG_TMPFS_XATTR=y
+CONFIG_TMPFS_POSIX_ACL=y
+EOF
+          # Net schedulers
+          cat >> "$D" <<'EOF'
+CONFIG_NET_SCH_FQ=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_SCH_CAKE=y
+CONFIG_NET_SCH_PIE=y
+CONFIG_NET_SCH_FQ_PIE=y
+EOF
+          # Rust
+          cat >> "$D" <<'EOF'
+CONFIG_ANDROID_BINDER_IPC_RUST=m
+CONFIG_RUST=y
+EOF
+
+      - name: Add BBR
+        if: ${{ inputs.bbr }}
+        run: |
+          cat >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig" <<'EOF'
+CONFIG_TCP_CONG_ADVANCED=y
+CONFIG_TCP_CONG_BBR=y
+EOF
+
+      - name: Add BBRv3
+        if: ${{ inputs.bbr3 }}
+        run: |
+          cd "$COMMON_KERNEL_DIR"
+          cat >> arch/arm64/configs/gki_defconfig <<'EOF'
+CONFIG_TCP_CONG_ADVANCED=y
+CONFIG_TCP_CONG_BBR3=y
+EOF
+          patch -p1 < "$GITHUB_WORKSPACE/kernel_patches/common/bbrv3/0001-net-tcp-backport-BBRv3-to-${ANDROID_VER}-${KERNEL_VER}.patch"
+
+      - name: Add TTL
+        if: ${{ inputs.ttl }}
+        run: |
+          cat >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig" <<'EOF'
+CONFIG_IP_NF_TARGET_TTL=y
+CONFIG_IP6_NF_TARGET_HL=y
+CONFIG_IP6_NF_MATCH_HL=y
+EOF
+
+      - name: Add IP Set & IPv6 NAT
+        if: ${{ inputs.ip_set }}
+        run: |
+          cat >> "$COMMON_KERNEL_DIR/arch/arm64/configs/gki_defconfig" <<'EOF'
+CONFIG_IP_SET=y
+CONFIG_IP_SET_MAX=65534
+CONFIG_IP_SET_BITMAP_IP=y
+CONFIG_IP_SET_BITMAP_IPMAC=y
+CONFIG_IP_SET_BITMAP_PORT=y
+CONFIG_IP_SET_HASH_IP=y
+CONFIG_IP_SET_HASH_IPMARK=y
+CONFIG_IP_SET_HASH_IPPORT=y
+CONFIG_IP_SET_HASH_IPPORTIP=y
+CONFIG_IP_SET_HASH_IPPORTNET=y
+CONFIG_IP_SET_HASH_IPMAC=y
+CONFIG_IP_SET_HASH_MAC=y
+CONFIG_IP_SET_HASH_NETPORTNET=y
+CONFIG_IP_SET_HASH_NET=y
+CONFIG_IP_SET_HASH_NETNET=y
+CONFIG_IP_SET_HASH_NETPORT=y
+CONFIG_IP_SET_HASH_NETIFACE=y
+CONFIG_IP_SET_LIST_SET=y
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+CONFIG_NETFILTER_XT_SET=y
+CONFIG_IP6_NF_NAT=y
+CONFIG_IP6_NF_TARGET_MASQUERADE=y
+EOF
+
+      - name: Vendor Module Blacklist
+        run: |
+          set -euo pipefail
+          cd "$COMMON_KERNEL_DIR"
+          BLACKLIST="oplus_security_guard,oplus_qr_scan,oplus_score,oplus_vip_task,oplus_dns_cache,oplus_network_linkpower_module,oplus_data_module,oplus_secure_harden,oplus_security_keventupload,oplus_secure_guard_new,oplus_secure_guard,coresight_tpda,coresight_tgu,coresight_trace_noc,coresight_cti,coresight_qmi,coresight_dummy,coresight_remote_etm,coresight_tpdm,coresight_uetm,coresight_stm,coresight_tmc_sec,f_fs_ipc_log,qti_battery_debug,rdbg,stm_heartbeat,stm_p_ost,stm_core,stm_ftrace,stm_console,spmi_pmic_arb_debug"
+          echo "CONFIG_DEBLOAT_VENDOR_MODULES=\"${BLACKLIST}\"" >> arch/arm64/configs/gki_defconfig
+          patch -p1 < "$GITHUB_WORKSPACE/kernel_patches/common/vendor_modules/0001-Support-conditional-vendor-modules-blacklisting-6.1-and-above.patch"
+          echo "✅ Module blacklist configured"
+
+      - name: Set Build Identity
+        run: |
+          echo "BUILD_USER=OnePlus" >> "$GITHUB_ENV"
+          echo "BUILD_HOST=ubuntu-build" >> "$GITHUB_ENV"
+
+      - name: Build Kernel
+        run: |
+          set -euo pipefail
+          cd "$COMMON_KERNEL_DIR"
+          : > .scmversion
+
+          COMMIT_TIMESTAMP=$(git log -1 --format=%ct 2>/dev/null || date +%s)
+          WORKSPACE="$GITHUB_WORKSPACE"
+          MAP="-fdebug-prefix-map=${WORKSPACE}=."
+          MPMAP="-fmacro-prefix-map=${WORKSPACE}=."
+          FPMAP="-ffile-prefix-map=${WORKSPACE}=."
+
+          export KCFLAGS="${KCFLAGS:-} $MAP $MPMAP $FPMAP -no-canonical-prefixes -fdiagnostics-color=never -Qunused-arguments -Wno-unused-command-line-argument -D__ANDROID_COMMON_KERNEL__"
+          export KCPPFLAGS="${KCPPFLAGS:-} $MAP $MPMAP $FPMAP"
+
+          export LLVM=1 LLVM_IAS=1
+          export ARCH=arm64 SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export PAHOLE="$KERNEL_PLATFORM_DIR/prebuilts/kernel-build-tools/linux-x86/bin/pahole"
+          export LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm
+          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+
+          set +u
+          source "$KERNEL_PLATFORM_DIR/build/kernel/_setup_env.sh" 2>/dev/null || true
+          set -u
+
+          echo '#!/bin/bash' > ld-wrapper
+          echo 'ld.lld "$@" --thinlto-jobs=$(nproc --all)' >> ld-wrapper
+          chmod +x ld-wrapper
+
+          export KBUILD_BUILD_USER="${BUILD_USER:-kernel}"
+          export KBUILD_BUILD_HOST="${BUILD_HOST:-kleaf}"
+          export KBUILD_BUILD_VERSION=1
+
+          if [ -n "${{ inputs.build_timestamp }}" ]; then
+            export KBUILD_BUILD_TIMESTAMP="${{ inputs.build_timestamp }}"
+          else
+            export KBUILD_BUILD_TIMESTAMP="$(date -u)"
+          fi
+
+          export CC="ccache clang"
+          export CXX="ccache clang++"
+          export HOSTCC="ccache clang"
+          export HOSTCXX="ccache clang++"
+
+          OUT=out
+          mkdir -p "$OUT"
+          make LD="$(pwd)/ld-wrapper" HOSTLD="$(pwd)/ld-wrapper" O="$OUT" gki_defconfig
+
+          CUSTOM_LOCALVERSION="-android16-OP-WILD"
+          scripts/config --file "$OUT/.config" --set-str LOCALVERSION "$CUSTOM_LOCALVERSION"
+          scripts/config --file "$OUT/.config" -d LOCALVERSION_AUTO || true
+          sed -i 's/scm_version="$(scm_version --short)"/scm_version=""/' scripts/setlocalversion
+
+          if [ "${{ inputs.optimize_level }}" = "O3" ]; then
+            scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
+            KCFLAGS_EXTRA="-O3"
+          else
+            scripts/config --file "$OUT/.config" -e CC_OPTIMIZE_FOR_PERFORMANCE -d CC_OPTIMIZE_FOR_PERFORMANCE_O3
+            KCFLAGS_EXTRA="-O2"
+          fi
+
+          KCFLAGS_EXTRA="-mcpu=oryon-1 ${KCFLAGS_EXTRA}"
+
+          scripts/config --file "$OUT/.config" -e LTO_CLANG -d LTO_CLANG_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL
+          case "${{ inputs.lto }}" in
+            none) scripts/config --file "$OUT/.config" -e LTO_CLANG_NONE ;;
+            thin) scripts/config --file "$OUT/.config" -e LTO_CLANG_THIN ;;
+            full) scripts/config --file "$OUT/.config" -e LTO_CLANG_FULL ;;
+          esac
+
+          make LD="$(pwd)/ld-wrapper" HOSTLD="$(pwd)/ld-wrapper" O="$OUT" olddefconfig
+
+          KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
+          KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
+
+          echo "Building kernel..."
+          BUILD_START=$(date +%s)
+
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            make V=1 LD="$(pwd)/ld-wrapper" HOSTLD="$(pwd)/ld-wrapper" -j"$(nproc --all)" O="$OUT" \
+              KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" Image modules 2>&1 | tee build.log
+          else
+            make LD="$(pwd)/ld-wrapper" HOSTLD="$(pwd)/ld-wrapper" -j"$(nproc --all)" O="$OUT" \
+              KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" Image 2>&1 | tee build.log
+          fi
+
+          BUILD_END=$(date +%s)
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+          echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
+
+          IMG="$OUT/arch/arm64/boot/Image"
+          if [ ! -f "$IMG" ]; then
+            echo "::error::Kernel Image not found"
+            tail -n 100 build.log
+            exit 1
+          fi
+          echo "✅ Build done in $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
+          ccache -s
+
+      - name: Collect Stats
+        id: stats
+        run: |
+          IMG="$COMMON_KERNEL_DIR/out/arch/arm64/boot/Image"
+          IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
+          WARNINGS=$(grep -ciE '\bwarning:' "$COMMON_KERNEL_DIR/build.log" 2>/dev/null || echo 0)
+          KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1)
+          echo "image_sha256=$IMG_SHA256" >> "$GITHUB_OUTPUT"
+          echo "warnings=$WARNINGS" >> "$GITHUB_OUTPUT"
+          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+          echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
+          echo "Kernel: $KERNEL_UNAME"
+          echo "SHA256: $IMG_SHA256"
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v7
+        with:
+          name: OP15-Image
+          path: ${{ env.COMMON_KERNEL_DIR }}/out/arch/arm64/boot/Image
+          archive: false
+          retention-days: 30
+
+      - name: Upload Debug Artifacts
+        if: ${{ inputs.debug }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: OP15-debug
+          path: |
+            ${{ env.COMMON_KERNEL_DIR }}/build.log
+            ${{ env.COMMON_KERNEL_DIR }}/out/.config
+          retention-days: 14
+
+      - name: Save ccache
+        uses: ./.github/actions/cache/save
+        if: ${{ success() && !inputs.clean_build }}
+        with:
+          cache_path: ${{ env.CCACHE_DIR }}
+          cache_key: standalone-v1-OP15-A16-${{ env.KERNEL_FULL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+          cache_bucket: "ccache-cache"
+
+      - name: Job Summary
+        if: always()
+        run: |
+          {
+            echo "### OP15 Standalone Build - ${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| **Kernel** | ${{ env.KERNEL_FULL_VER }} |"
+            echo "| **Uname** | \`${{ env.KERNEL_UNAME }}\` |"
+            echo "| **Image SHA256** | \`${{ steps.stats.outputs.image_sha256 }}\` |"
+            echo "| **Build Time** | ${{ steps.stats.outputs.build_time }}s |"
+            echo "| **Warnings** | ${{ steps.stats.outputs.warnings }} |"
+            echo "| **Features** | opt:${{ inputs.opt }} bbg:${{ inputs.bbg }} bbr:${{ inputs.bbr }} bbr3:${{ inputs.bbr3 }} ttl:${{ inputs.ttl }} ips:${{ inputs.ip_set }} uni:${{ inputs.unicode }} ds:${{ inputs.ds }} ntsync:${{ inputs.ntsync }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Final Cleanup
+        if: always()
+        run: |
+          sudo rm -rf "$GITHUB_WORKSPACE/OP15/.repo" || true
+          df -h /
