@@ -170,6 +170,7 @@ jobs:
           short=$("$CLANG_BIN/clang" --version | sed -n '1s/.*clang-r\([0-9.]\+\).*/\1/p')
           echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
           echo "CLANG_VERSION_SHORT=$short" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=$CLANG_BIN/../lib" >> "$GITHUB_ENV"
           echo "✅ Clang: $CLANG_VERSION"
 
       - name: Detect Rust & bindgen
