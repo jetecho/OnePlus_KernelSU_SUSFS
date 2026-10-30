@@ -337,6 +337,7 @@ jobs:
           sed -i 's/do.check_boot_version=.*/do.check_boot_version=1/' "$AK3/anykernel.sh"
           ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_clean.zip"
           (cd "$AK3" && zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" ./* -x "*.git*")
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
           echo "ZIP_PATH=$GITHUB_WORKSPACE/$ZIP_NAME" >> "$GITHUB_ENV"
           echo "✅ $ZIP_NAME ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$GITHUB_WORKSPACE/$ZIP_NAME")"))"
           echo "::endgroup::"
