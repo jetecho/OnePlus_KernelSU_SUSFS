@@ -1,0 +1,365 @@
+name: Build Clean OnePlus 15 Kernel (A16)
+
+# Standalone clean build for OnePlus 15 (SM8850 / android16-6.12).
+# No KernelSU / SUSFS / BBG / feature patches — stock gki_defconfig only.
+#
+# - Outputs workflow artifacts ONLY (Image + optional AnyKernel3 zip).
+# - Never creates or uploads GitHub Releases.
+# - ccache uses the Actions cache, not the release-based ccache-cache bucket.
+# - Reads (never writes) the toolchain-cache release for clang/rust/etc.
+#   If assets are missing, run the '🛠️ ToolChains Generator' workflow first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lto:
+        description: 'LTO mode (stock = keep gki_defconfig value)'
+        required: false
+        type: choice
+        default: none
+        options:
+          - stock
+          - none
+          - thin
+      use_ccache:
+        description: 'Use ccache acceleration (Actions cache)'
+        required: false
+        type: boolean
+        default: true
+      package_ak3:
+        description: 'Package a flashable AnyKernel3 zip'
+        required: false
+        type: boolean
+        default: true
+      debug:
+        description: 'Verbose build (V=1)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: OP15 (android16-6.12) clean build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Set device config
+        run: |
+          set -euo pipefail
+          cat >> "$GITHUB_ENV" << EOF
+          OP_MODEL=OP15
+          OP_OS_VERSION=A16
+          OP_ANDROID_VERSION=android16
+          OP_KERNEL_VERSION=6.12
+          OP_BRANCH=wild/sm8850
+          OP_MANIFEST=oneplus_15_w.xml
+          CONFIG_FOLDER=$GITHUB_WORKSPACE/OP15
+          KERNEL_PLATFORM_FOLDER=$GITHUB_WORKSPACE/OP15/kernel_platform
+          COMMON_KERNEL_FOLDER=$GITHUB_WORKSPACE/OP15/kernel_platform/common
+          EOF
+
+      - name: Emergency Disk Cleanup
+        uses: ./.github/actions/disk-cleanup
+
+      - name: Install Minimal Dependencies
+        run: |
+          set -euo pipefail
+          echo "::group::Install dependencies"
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git curl ca-certificates build-essential clang lld flex bison \
+            libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
+            libxml2-utils rsync unzip dwarves file python3 ccache jq bc \
+            kmod libdw-dev elfutils pigz zstd aria2 zip
+          sudo apt-get clean
+          echo "✅ Dependencies installed"
+          echo "::endgroup::"
+
+      - name: Preflight - check toolchain mirror
+        run: |
+          set -euo pipefail
+          echo "::group::Preflight toolchain-cache check"
+          python3 - << 'PYEOF'
+          import xml.etree.ElementTree as ET
+          import urllib.request, re, sys
+
+          manifest = ET.parse("manifests/a16/oneplus_15_w.xml").getroot()
+          TOOLCHAIN_MAP = {
+              "clang/host/linux-x86": "clang",
+              "prebuilts/rust": "rust",
+              "prebuilts/clang-tools": "clang-tools",
+              "kernel/prebuilts/build-tools": "build-tools",
+              "AnyKernel3": "AnyKernel3",
+          }
+
+          needed = set()
+          for project in manifest.findall("project"):
+              name = project.get("name", "")
+              rev = project.get("revision", "")
+              for key, label in TOOLCHAIN_MAP.items():
+                  if key in name:
+                      needed.add(f"{label}-{rev}.tar.gz")
+                      break
+
+          req = urllib.request.Request(
+              "https://github.com/${{ github.repository }}/releases/expanded_assets/toolchain-cache",
+              headers={"User-Agent": "Mozilla/5.0"})
+          html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+          assets = set(re.findall(r"download/toolchain-cache/([^\"' ]+)", html))
+
+          missing = [f for f in sorted(needed) if f not in assets and f + ".partaa" not in assets]
+          if missing:
+              print("::error::Missing toolchain-cache assets: " + ", ".join(missing))
+              print("::error::Run the '🛠️ ToolChains Generator' workflow (mirror-toolchains.yml) first.")
+              sys.exit(1)
+          print(f"✅ toolchain-cache has all {len(needed)} required assets")
+          PYEOF
+          echo "::endgroup::"
+
+      - name: Sync Kernel Source
+        uses: ./.github/actions/kernel-source-sync
+        with:
+          source_location: OP15
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect Toolchain and Kernel Version
+        run: |
+          set -euo pipefail
+          echo "::group::Detect toolchain & kernel version"
+          PREBUILTS="$KERNEL_PLATFORM_FOLDER/prebuilts"
+
+          # Kernel version from Makefile
+          cd "$COMMON_KERNEL_FOLDER"
+          VERSION=$(grep '^VERSION *=' Makefile | awk '{print $3}')
+          PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
+          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
+          echo "KERNEL_FULL_VER=$VERSION.$PATCHLEVEL.$SUBLEVEL" >> "$GITHUB_ENV"
+          echo "Kernel: $VERSION.$PATCHLEVEL.$SUBLEVEL"
+
+          # Clang: pinned revision from the device config, else newest prebuilt
+          CLANG_BIN=""
+          pinned="$PREBUILTS/clang/host/linux-x86/clang-r547379/bin"
+          if [ -x "$pinned/clang" ]; then
+            CLANG_BIN="$pinned"
+          else
+            latest=$(ls -d "$PREBUILTS"/clang/host/linux-x86/clang-r* 2>/dev/null | sort -V | tail -n1 || true)
+            [ -n "$latest" ] && [ -x "$latest/bin/clang" ] && CLANG_BIN="$latest/bin"
+          fi
+          [ -n "$CLANG_BIN" ] || { echo "::error::No clang toolchain found in prebuilts"; exit 1; }
+          echo "CLANG_BIN=$CLANG_BIN" >> "$GITHUB_ENV"
+          echo "CLANG_VERSION=$("$CLANG_BIN/clang" --version | head -n1)" >> "$GITHUB_ENV"
+          short="$("$CLANG_BIN/clang" --version | sed -n '1s/.*clang-r\([0-9.]\+\).*/\1/p')"
+          [ -n "$short" ] || short=$("$CLANG_BIN/clang" --version | sha256sum | cut -c1-8)
+          echo "CLANG_SHORT=$short" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=$CLANG_BIN/../lib" >> "$GITHUB_ENV"
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
+          echo "✅ Clang: $("$CLANG_BIN/clang" --version | head -n1)"
+
+          # Rust & bindgen (optional — only needed if gki_defconfig enables CONFIG_RUST)
+          rust_dir=$(ls -d "$PREBUILTS"/rust/linux-x86/1.* 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$rust_dir" ] && [ -x "$rust_dir/bin/rustc" ]; then
+            echo "RUSTC=$rust_dir/bin/rustc" >> "$GITHUB_ENV"
+            echo "$rust_dir/bin" >> "$GITHUB_PATH"
+            echo "✅ Rust: $("$rust_dir/bin/rustc" --version)"
+          else
+            echo "RUSTC=" >> "$GITHUB_ENV"
+            echo "::warning::No rustc in prebuilts; CONFIG_RUST will be disabled if enabled"
+          fi
+
+          if [ -x "$PREBUILTS/clang-tools/linux-x86/bin/bindgen" ]; then
+            chmod +x "$PREBUILTS/clang-tools/linux-x86/bin/bindgen"
+            echo "BINDGEN=$PREBUILTS/clang-tools/linux-x86/bin/bindgen" >> "$GITHUB_ENV"
+            echo "$PREBUILTS/clang-tools/linux-x86/bin" >> "$GITHUB_PATH"
+            echo "✅ bindgen: $("$PREBUILTS/clang-tools/linux-x86/bin/bindgen" --version | head -n1)"
+          else
+            echo "BINDGEN=" >> "$GITHUB_ENV"
+            echo "::warning::No bindgen in prebuilts; CONFIG_RUST will be disabled if enabled"
+          fi
+
+          # pahole & build-tools
+          echo "$KERNEL_PLATFORM_FOLDER/prebuilts/kernel-build-tools/linux-x86/bin" >> "$GITHUB_PATH"
+          echo "::endgroup::"
+
+      - name: Restore ccache
+        if: ${{ inputs.use_ccache }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: clean-op15-a16-v1-${{ env.CLANG_SHORT }}
+          restore-keys: |
+            clean-op15-a16-v1-
+
+      - name: Configure ccache
+        if: ${{ inputs.use_ccache }}
+        run: |
+          set -euo pipefail
+          echo "::group::Configure ccache"
+          CACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          mkdir -p "$CACHE_DIR"
+          {
+            echo "CCACHE_DIR=$CACHE_DIR"
+            echo "CCACHE_MAXSIZE=8G"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_IGNOREOPTIONS=--sysroot*"
+            echo "CCACHE_COMPRESSION=true"
+            echo "CCACHE_COMPRESSION_LEVEL=3"
+            echo "CCACHE_DIRECT=true"
+            echo "CCACHE_FILE_CLONE=true"
+            echo "CCACHE_INODE_CACHE=true"
+            echo "CCACHE_IS_KERNEL_COMPILING=true"
+            echo "CCACHE_UMASK=002"
+            echo "CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale"
+          } >> "$GITHUB_ENV"
+          if ccache --help 2>&1 | grep -q 'depend_mode'; then
+            echo "CCACHE_DEPEND=true" >> "$GITHUB_ENV"
+          fi
+          ccache -z
+          echo "✅ ccache configured"
+          echo "::endgroup::"
+
+      - name: Build Kernel
+        run: |
+          set -euo pipefail
+          echo "::group::Build clean kernel"
+          cd "$COMMON_KERNEL_FOLDER"
+          : > .scmversion
+
+          export LLVM=1 LLVM_IAS=1 ARCH=arm64 SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export PAHOLE="$KERNEL_PLATFORM_FOLDER/prebuilts/kernel-build-tools/linux-x86/bin/pahole"
+          export LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm
+          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+
+          if [ "${{ inputs.use_ccache }}" = "true" ]; then
+            export CC="ccache clang" CXX="ccache clang++" HOSTCC="ccache clang" HOSTCXX="ccache clang++"
+          else
+            export CC=clang CXX=clang++ HOSTCC=clang HOSTCXX=clang++
+          fi
+
+          V_FLAG=""
+          [ "${{ inputs.debug }}" = "true" ] && V_FLAG="V=1"
+
+          make $V_FLAG O=out gki_defconfig
+
+          # No usable rust toolchain → drop CONFIG_RUST (stock defconfig decides otherwise)
+          if [ ! -x "${RUSTC:-}" ] && grep -q '^CONFIG_RUST=y' out/.config 2>/dev/null; then
+            echo "::warning::CONFIG_RUST enabled but no rustc/bindgen found — disabling"
+            scripts/config --file out/.config -d RUST
+          fi
+
+          case "${{ inputs.lto }}" in
+            stock)
+              echo "Keeping stock gki_defconfig LTO setting" ;;
+            none)
+              scripts/config --file out/.config -e LTO_CLANG -d LTO_CLANG_THIN -d LTO_CLANG_FULL -e LTO_CLANG_NONE ;;
+            thin)
+              scripts/config --file out/.config -e LTO_CLANG -d LTO_CLANG_NONE -d LTO_CLANG_FULL -e LTO_CLANG_THIN ;;
+            *)
+              echo "::error::Unsupported LTO option: ${{ inputs.lto }}"; exit 1 ;;
+          esac
+
+          make $V_FLAG O=out olddefconfig
+
+          MAP="-fdebug-prefix-map=$GITHUB_WORKSPACE=. -fmacro-prefix-map=$GITHUB_WORKSPACE=. -ffile-prefix-map=$GITHUB_WORKSPACE=."
+          KCFLAGS="-Wno-error -pipe $MAP -no-canonical-prefixes -fdiagnostics-color=never -Qunused-arguments"
+
+          BUILD_START=$(date +%s)
+          make $V_FLAG -j"$(nproc --all)" O=out KCFLAGS="$KCFLAGS" Image 2>&1 | tee build.log
+          BUILD_END=$(date +%s)
+          echo "BUILD_TIME=$((BUILD_END - BUILD_START))" >> "$GITHUB_ENV"
+
+          IMG="$COMMON_KERNEL_FOLDER/out/arch/arm64/boot/Image"
+          if [ ! -f "$IMG" ]; then
+            echo "::error::Kernel Image missing"
+            echo "::group::Last 100 lines of build log"
+            tail -n 100 build.log || true
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "IMAGE_PATH=$IMG" >> "$GITHUB_ENV"
+          echo "IMAGE_SHA256=$(sha256sum "$IMG" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "✅ Build completed: $(numfmt --to=iec-i --suffix=B "$(stat -c%s "$IMG")") in $(( (BUILD_END - BUILD_START) / 60 ))m $(( (BUILD_END - BUILD_START) % 60 ))s"
+          echo "::endgroup::"
+
+      - name: Upload build log (on failure)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: OP15/kernel_platform/common/build.log
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Trim ccache before save
+        if: ${{ inputs.use_ccache && success() }}
+        run: |
+          echo "::group::ccache statistics & trim"
+          ccache -s || true
+          ccache -c || true
+          find "$CCACHE_DIR" -type f -mtime +0.5 -delete 2>/dev/null || true
+          find "$CCACHE_DIR" -type d -empty -delete 2>/dev/null || true
+          rm -f "$CCACHE_DIR/ccache.log" || true
+          echo "::endgroup::"
+
+      - name: Upload kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP15-A16-clean-Image
+          path: |
+            OP15/kernel_platform/common/out/arch/arm64/boot/Image
+            OP15/kernel_platform/common/out/.config
+          retention-days: 30
+
+      - name: Package AnyKernel3 flashable zip
+        if: ${{ inputs.package_ak3 }}
+        run: |
+          set -euo pipefail
+          echo "::group::Package AnyKernel3 zip"
+          AK3="$CONFIG_FOLDER/AnyKernel3"
+          if [ ! -d "$AK3" ]; then
+            echo "AnyKernel3 not in sync tree, cloning upstream..."
+            git clone --depth=1 https://github.com/osm0sis/AnyKernel3 "$AK3"
+            rm -rf "$AK3/.git"
+          fi
+          cp "$IMAGE_PATH" "$AK3/Image"
+          sed -i 's/do.check_boot_version=.*/do.check_boot_version=1/' "$AK3/anykernel.sh"
+          ZIP_NAME="AK3_${OP_MODEL}_${OP_OS_VERSION}_${KERNEL_FULL_VER}_clean.zip"
+          (cd "$AK3" && zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" ./* -x "*.git*")
+          echo "ZIP_PATH=$GITHUB_WORKSPACE/$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "✅ $ZIP_NAME ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$GITHUB_WORKSPACE/$ZIP_NAME")"))"
+          echo "::endgroup::"
+
+      - name: Upload AnyKernel3 zip
+        if: ${{ inputs.package_ak3 }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_PATH }}
+          retention-days: 30
+
+      - name: Build Summary
+        if: ${{ success() }}
+        run: |
+          {
+            echo "## 🎯 Clean OP15 Kernel Build"
+            echo ""
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| **Device** | OnePlus 15 (OP15, SM8850) |"
+            echo "| **Android / Kernel** | android16-6.12 → \`${{ env.KERNEL_FULL_VER }}\` |"
+            echo "| **Compiler** | ${{ env.CLANG_VERSION }} |"
+            echo "| **LTO** | ${{ inputs.lto }} |"
+            echo "| **Root components** | none (clean stock build) |"
+            echo "| **Build time** | ${{ env.BUILD_TIME }}s |"
+            echo "| **ccache** | ${{ inputs.use_ccache && 'enabled (Actions cache)' || 'disabled' }} |"
+            echo "| **Image SHA256** | \`${{ env.IMAGE_SHA256 }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
