@@ -64,7 +64,8 @@ jobs:
           COMMON_KERNEL_FOLDER=$GITHUB_WORKSPACE/OP15/kernel_platform/common
           EOF
           # kernel-source-sync runs with working-directory: OP15, which must exist up front
-          mkdir -p "$CONFIG_FOLDER"
+          # (GITHUB_ENV vars are not visible in this step's shell, so use the literal path)
+          mkdir -p "$GITHUB_WORKSPACE/OP15"
 
       - name: Emergency Disk Cleanup
         uses: ./.github/actions/disk-cleanup
